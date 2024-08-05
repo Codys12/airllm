@@ -184,6 +184,7 @@ def remove_real_and_linked_file(to_delete):
          os.remove(targetpath)
 
 
+
 def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None, splitted_model_dir_name='splitted_model',
                           compression=None, layer_names=None, delete_original=False, repo_id=None, hf_token=None):
     """
@@ -196,10 +197,12 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None, splitt
 
     checkpoint_path = Path(checkpoint_path)
 
+
     saving_path = checkpoint_path / splitted_model_dir_name
 
     if layer_shards_saving_path is not None:
         saving_path = Path(layer_shards_saving_path) / splitted_model_dir_name
+
 
     safetensors_format = False
     if os.path.exists(checkpoint_path / 'pytorch_model.bin.index.json'):
@@ -225,38 +228,52 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None, splitt
             layers = [layer_names['rotary_pos_emb']] + layers
         layers = [l + "." for l in layers]
 
+
     # check if splitting exists and all files are there
     found_layers = None
+    #print(f"checking exists: {saving_path}")
     if os.path.exists(saving_path):
+        # dir already exists, check if all layer files are there
+
         found_layers = {}
         for layer in layers:
             found_layers[layer] = ModelPersister.get_model_persister().model_persist_exist(layer, saving_path)
 
         print(f"found_layers:{found_layers}")
         if all(found_layers.values()):
+            # already downloaded, return saving path...
             print(f"saved layers already found in {saving_path}")
             return str(saving_path)
         else:
             print(f"some layer splits found, some are not, re-save all layers in case there's some corruptions.")
 
+
     if not delete_original:
         check_space(checkpoint_path, layer_shards_saving_path, compression, splitted_model_dir_name=splitted_model_dir_name)
+
+
 
     shard = 0
     n_shards = len(set(index.values()))
     state_dict = {}
 
+
+
     if not os.path.exists(saving_path):
+        #os.makedirs(saving_path)
         saving_path.mkdir(parents=True, exist_ok=True)
 
     for layer in tqdm(layers):
+
+        # Optionnally load next shard
         shards = [int(v.split('-')[1]) for k, v in index.items() if k.startswith(layer)]
         if max(shards) > shard:
+            # optinoally delete original file
             if delete_original and shard != 0:
                 if not safetensors_format:
-                    to_delete = checkpoint_path / f'pytorch_model-000{shard:02d}-of-000{n_shards:02d}.bin'
+                    to_delete = checkpoint_path / f'pytorch_model-{shard:05d}-of-{n_shards:05d}.bin'
                 else:
-                    to_delete = checkpoint_path / f'model-000{shard:02d}-of-000{n_shards:02d}.safetensors'
+                    to_delete = checkpoint_path / f'model-{shard:05d}-of-{n_shards:05d}.safetensors'
 
                 print(f"deleting original file: {to_delete}")
                 remove_real_and_linked_file(to_delete)
@@ -264,16 +281,11 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None, splitt
             print(f'Loading shard {shard}/{n_shards}')
 
             if not safetensors_format:
-                to_load = checkpoint_path / f'pytorch_model-000{shard:02d}-of-000{n_shards:02d}.bin'
+                to_load = checkpoint_path / f'pytorch_model-{shard:05d}-of-{n_shards:05d}.bin'
             else:
-                to_load = checkpoint_path / f'model-000{shard:02d}-of-000{n_shards:02d}.safetensors'
+                to_load = checkpoint_path / f'model-{shard:05d}-of-{n_shards:05d}.safetensors'
 
-            # Check if to_load is a symlink
-            if os.path.islink(to_load):
-                real_path = os.path.realpath(to_load)
-                print(f"File {to_load} is a symlink. Loading from actual file: {real_path}")
-                to_load = real_path
-
+            # check if to_load exist, if not downloaad it...
             if not os.path.exists(to_load):
                 assert repo_id is not None
                 huggingface_hub.snapshot_download(repo_id, allow_patterns=os.path.basename(to_load),
@@ -284,14 +296,21 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None, splitt
             else:
                 state_dict.update(load_file(to_load, device='cpu'))
 
+
+        # Get layer state dict
         layer_state_dict = dict([(k, v) for k, v in state_dict.items() if k.startswith(layer)])
 
         layer_state_dict = compress_layer_state_dict(layer_state_dict, compression)
+
+
+        # Save layer state dict as using safetensors
 
         marker_exists = ModelPersister.get_model_persister().model_persist_exist(layer, saving_path)
         if not marker_exists:
             ModelPersister.get_model_persister().persist_model(layer_state_dict, layer, saving_path)
 
+
+        # Free memory
         for k in layer_state_dict.keys():
             if k in state_dict:
                 del state_dict[k]
@@ -299,7 +318,6 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None, splitt
         clean_memory()
 
     return str(saving_path)
-
 
 def find_or_create_local_splitted_path(model_local_path_or_repo_id, layer_shards_saving_path=None, compression=None,
                                        layer_names=None, hf_token=None, delete_original=False):
