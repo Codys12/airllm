@@ -377,7 +377,8 @@ class AirLLMBaseModel(GenerationMixin):
             return_dict: Optional[bool] = None,
             top_k: int = 5,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        use_cache = False if cache_utils_installed else use_cache
+        if cache_utils_installed:
+            use_cache = False
 
         # Move input tensors to the correct device
         input_ids = input_ids.to(self.running_device)
@@ -390,54 +391,65 @@ class AirLLMBaseModel(GenerationMixin):
 
         # Create attention mask and position ids if not provided
         if attention_mask is None:
-            attention_mask = torch.ones(batch_size, seq_len, device=self.running_device)
+            attention_mask = torch.ones(self.max_seq_len, self.max_seq_len, device=self.running_device)
+            attention_mask = attention_mask.triu(diagonal=1)[None, None, ...] == 0
         if position_ids is None:
-            position_ids = torch.arange(seq_len, dtype=torch.long, device=self.running_device).unsqueeze(0).expand(batch_size, -1)
+            position_ids = torch.arange(self.max_seq_len, dtype=torch.long, device=self.running_device)[None, :]
 
         hidden_states = None
         all_hidden_states = [] if output_hidden_states else None
         all_self_attns = [] if output_attentions else None
         kv_cache_list = [] if use_cache else None
 
-        for i, (layer_name, layer) in enumerate(zip(self.layer_names, self.layers)):
-            # Load layer to device
-            state_dict = self.load_layer_to_cpu(layer_name)
-            
-            # Move layer parameters to device without using .to()
-            for param_name, param in state_dict.items():
-                set_module_tensor_to_device(self.model, param_name, self.running_device, value=param, dtype=self.running_dtype)
+        with torch.inference_mode(), ThreadPoolExecutor() as executor:
+            if self.prefetching:
+                future = executor.submit(self.load_layer_to_cpu, self.layer_names[0])
 
-            if layer_name == self.layer_names_dict['embed']:
-                hidden_states = layer(input_ids)
-            elif layer_name == self.layer_names_dict['norm']:
-                hidden_states = self.run_norm(layer, hidden_states)
-            elif layer_name == self.layer_names_dict['lm_head']:
-                logits = self.run_lm_head(layer, hidden_states, top_k)
-            else:
-                layer_outputs = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_values[i-1] if past_key_values is not None else None,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions
-                )
+            for i, (layer_name, layer) in tqdm(enumerate(zip(self.layer_names, self.layers)),
+                                            desc=f'running layers({self.running_device})',
+                                            total=len(self.layers)):
+                if self.prefetching:
+                    state_dict = future.result()
+                    moved_layers = self.move_layer_to_device(state_dict)
+                    if (i + 1) < len(self.layer_names):
+                        future = executor.submit(self.load_layer_to_cpu, self.layer_names[i+1])
+                else:
+                    state_dict = self.load_layer_to_cpu(layer_name)
+                    moved_layers = self.move_layer_to_device(state_dict)
 
-                hidden_states = layer_outputs[0]
+                if layer_name == self.layer_names_dict['embed']:
+                    hidden_states = layer(input_ids)
+                elif layer_name == self.layer_names_dict['norm']:
+                    hidden_states = self.run_norm(layer, hidden_states)
+                elif layer_name == self.layer_names_dict['lm_head']:
+                    logits = self.run_lm_head(layer, hidden_states, top_k)
+                else:
+                    layer_outputs = layer(
+                        hidden_states,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_value=past_key_values[i-1] if past_key_values is not None else None,
+                        use_cache=use_cache,
+                        output_attentions=output_attentions
+                    )
+                    hidden_states = layer_outputs[0]
 
-                if use_cache:
-                    kv_cache_list.append(layer_outputs[1])
-                if output_attentions:
-                    all_self_attns.append(layer_outputs[1] if use_cache else layer_outputs[2])
+                    if use_cache:
+                        kv_cache_list.append(layer_outputs[1])
+                    if output_attentions:
+                        all_self_attns.append(layer_outputs[1] if use_cache else layer_outputs[2])
 
-            if output_hidden_states:
-                all_hidden_states.append(hidden_states)
+                if output_hidden_states:
+                    all_hidden_states.append(hidden_states)
 
-            # Move layer parameters back to meta
-            for param_name in state_dict.keys():
-                set_module_tensor_to_device(self.model, param_name, 'meta')
+                # Remove previous layer from memory (including buffers)
+                if self.hf_quantizer is not None:
+                    for param_name in moved_layers:
+                        set_module_tensor_to_device(self.model, param_name, 'meta')
+                else:
+                    layer.to("meta")
 
-            clean_memory()
+                clean_memory()
 
         if not return_dict:
             return tuple(v for v in [logits, kv_cache_list, all_hidden_states, all_self_attns] if v is not None)
@@ -445,7 +457,7 @@ class AirLLMBaseModel(GenerationMixin):
         return CausalLMOutputWithPast(
             loss=None,
             logits=logits,
-            past_key_values=kv_cache_list,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attns,
+            past_key_values=tuple(kv_cache_list) if kv_cache_list is not None else None,
+            hidden_states=tuple(all_hidden_states) if all_hidden_states is not None else None,
+            attentions=tuple(all_self_attns) if all_hidden_states is not None else None,
         )
