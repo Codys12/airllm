@@ -416,6 +416,7 @@ class AirLLMBaseModel(GenerationMixin):
                 else:
                     state_dict = self.load_layer_to_cpu(layer_name)
                     moved_layers = self.move_layer_to_device(state_dict)
+                    print("YO")
 
                 if layer_name == self.layer_names_dict['embed']:
                     hidden_states = layer(input_ids)
@@ -424,6 +425,7 @@ class AirLLMBaseModel(GenerationMixin):
                 elif layer_name == self.layer_names_dict['lm_head']:
                     logits = self.run_lm_head(layer, hidden_states, top_k)
                 else:
+                    hidden_states.to(self.running_devie)
                     layer_outputs = layer(
                         hidden_states,
                         attention_mask=attention_mask,
