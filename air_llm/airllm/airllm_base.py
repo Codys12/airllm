@@ -181,7 +181,7 @@ class AirLLMBaseModel(GenerationMixin):
     def init_model(self):
         
         with init_empty_weights():
-            self.model = AutoModelForCausalLM.from_config(self.config, trust_remote_code=True, attn_implementation="flash_attention_2")
+            self.model = AutoModelForCausalLM.from_config(self.config, trust_remote_code=True, attn_implementation="flash_attention_2", torch_dtype=torch.bfloat16)
 
         quantization_config = getattr(self.config, "quantization_config", None)
 
