@@ -121,7 +121,7 @@ class AirLLMBaseModel(GenerationMixin):
             self.config = AutoConfig.from_pretrained(self.model_local_path, token=hf_token, trust_remote_code=True)
         else:
             print("HI")
-            self.config = AutoConfig.from_pretrained(self.model_local_path, trust_remote_code=True, load_in_4bit=True, attn_implementation="flash_attention_2")
+            self.config = AutoConfig.from_pretrained(self.model_local_path, trust_remote_code=True, load_in_4bit=True, torch_dtype=torch.bfloat16)
 
         self.generation_config = self.get_generation_config()
         #print(f"using generation_config: {self.generation_config}")
@@ -179,7 +179,6 @@ class AirLLMBaseModel(GenerationMixin):
         return True
 
     def init_model(self):
-        self.config.attn_implementation = "flash_attention_2"
         
         with init_empty_weights():
             self.model = AutoModelForCausalLM.from_config(self.config, trust_remote_code=True, attn_implementation="flash_attention_2")
