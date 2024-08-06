@@ -427,7 +427,7 @@ class AirLLMBaseModel(GenerationMixin):
                 else:
                     layer_outputs = layer(
                         hidden_states,
-                        attention_mask=attention_mask,
+                        #attention_mask=attention_mask,
                         position_ids=position_ids,
                         past_key_value=past_key_values[i-1] if past_key_values is not None else None,
                         use_cache=use_cache,
