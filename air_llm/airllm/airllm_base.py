@@ -182,7 +182,7 @@ class AirLLMBaseModel(GenerationMixin):
         self.config.attn_implementation = "flash_attention_2"
         
         with init_empty_weights():
-            self.model = AutoModelForCausalLM.from_config(self.config, trust_remote_code=True)
+            self.model = AutoModelForCausalLM.from_config(self.config, trust_remote_code=True, attn_implementation="flash_attention_2")
 
         quantization_config = getattr(self.config, "quantization_config", None)
 
