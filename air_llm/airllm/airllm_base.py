@@ -425,7 +425,8 @@ class AirLLMBaseModel(GenerationMixin):
                 elif layer_name == self.layer_names_dict['lm_head']:
                     logits = self.run_lm_head(layer, hidden_states, top_k)
                 else:
-                    with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=True):
+                    with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=True), torch.no_grad():
+                        print(layer.self_attn)
                         layer_outputs = layer(
                             hidden_states,
                             #attention_mask=attention_mask,
