@@ -447,7 +447,7 @@ class AirLLMBaseModel(GenerationMixin):
 
                         layer_outputs = layer(
                             mb_hidden_states,
-                            attention_mask=mb_attention_mask,
+                            #attention_mask=mb_attention_mask,
                             position_ids=mb_position_ids,
                             past_key_value=mb_past_key_value,
                             use_cache=use_cache,
