@@ -402,7 +402,10 @@ class AirLLMBaseModel(GenerationMixin):
         for i, (layer_name, layer) in enumerate(zip(self.layer_names, self.layers)):
             # Load layer to device
             state_dict = self.load_layer_to_cpu(layer_name)
-            moved_layers = self.move_layer_to_device(state_dict)
+            
+            # Move layer parameters to device without using .to()
+            for param_name, param in state_dict.items():
+                set_module_tensor_to_device(self.model, param_name, self.running_device, value=param, dtype=self.running_dtype)
 
             if layer_name == self.layer_names_dict['embed']:
                 hidden_states = layer(input_ids)
@@ -430,12 +433,10 @@ class AirLLMBaseModel(GenerationMixin):
             if output_hidden_states:
                 all_hidden_states.append(hidden_states)
 
-            # Remove layer from GPU memory
-            if self.hf_quantizer is not None:
-                for param_name in moved_layers:
-                    set_module_tensor_to_device(self.model, param_name, 'meta')
-            else:
-                layer.to("meta")
+            # Move layer parameters back to meta
+            for param_name in state_dict.keys():
+                set_module_tensor_to_device(self.model, param_name, 'meta')
+
             clean_memory()
 
         if not return_dict:
