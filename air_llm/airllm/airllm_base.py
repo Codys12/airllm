@@ -120,7 +120,7 @@ class AirLLMBaseModel(GenerationMixin):
         if hf_token is not None:
             self.config = AutoConfig.from_pretrained(self.model_local_path, token=hf_token, trust_remote_code=True)
         else:
-            self.config = AutoConfig.from_pretrained(self.model_local_path, trust_remote_code=True, load_in_4bit=True)
+            self.config = AutoConfig.from_pretrained(self.model_local_path, trust_remote_code=True, load_in_4bit=True, attn_implementation="flash_attention_2")
 
         self.generation_config = self.get_generation_config()
         #print(f"using generation_config: {self.generation_config}")
