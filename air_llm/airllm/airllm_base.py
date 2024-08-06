@@ -363,51 +363,62 @@ class AirLLMBaseModel(GenerationMixin):
     def run_norm(self, layer, seq):
         return layer(seq)
 
-    def forward(
-            self,
-            input_ids: torch.LongTensor = None,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            past_key_values: Optional[List[torch.FloatTensor]] = None,
-            inputs_embeds: Optional[torch.FloatTensor] = None,
-            labels: Optional[torch.LongTensor] = None,
-            use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
-            top_k: int = 5,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
-        if cache_utils_installed:
-            use_cache = False
+def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        top_k: int = 5,
+        minibatch: int = 1,
+) -> Union[Tuple, CausalLMOutputWithPast]:
+    if cache_utils_installed:
+        use_cache = False
 
-        # Move input tensors to the correct device
-        input_ids = input_ids.to(self.running_device)
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(self.running_device)
-        if position_ids is not None:
-            position_ids = position_ids.to(self.running_device)
+    # Move input tensors to the correct device
+    input_ids = input_ids.to(self.running_device)
+    if attention_mask is not None:
+        attention_mask = attention_mask.to(self.running_device)
+    if position_ids is not None:
+        position_ids = position_ids.to(self.running_device)
 
-        batch_size, seq_len = input_ids.shape
+    batch_size, seq_len = input_ids.shape
 
-        # Create attention mask and position ids if not provided
-        if attention_mask is None:
-            attention_mask = torch.ones(self.max_seq_len, self.max_seq_len, device=self.running_device)
-            attention_mask = attention_mask.triu(diagonal=1)[None, None, ...] == 0
-        if position_ids is None:
-            position_ids = torch.arange(self.max_seq_len, dtype=torch.long, device=self.running_device)[None, :]
+    # Create attention mask and position ids if not provided
+    if attention_mask is None:
+        attention_mask = torch.ones(self.max_seq_len, self.max_seq_len, device=self.running_device)
+        attention_mask = attention_mask.triu(diagonal=1)[None, None, ...] == 0
+    if position_ids is None:
+        position_ids = torch.arange(self.max_seq_len, dtype=torch.long, device=self.running_device)[None, :]
 
-        hidden_states = None
-        all_hidden_states = [] if output_hidden_states else None
-        all_self_attns = [] if output_attentions else None
-        kv_cache_list = [] if use_cache else None
+    all_hidden_states = [] if output_hidden_states else None
+    all_self_attns = [] if output_attentions else None
+    kv_cache_list = [] if use_cache else None
+    all_logits = []
 
-        with torch.inference_mode(), ThreadPoolExecutor() as executor:
-            if self.prefetching:
-                future = executor.submit(self.load_layer_to_cpu, self.layer_names[0])
+    with torch.inference_mode(), ThreadPoolExecutor() as executor:
+        if self.prefetching:
+            future = executor.submit(self.load_layer_to_cpu, self.layer_names[0])
+
+        for mb_start in range(0, batch_size, minibatch):
+            mb_end = min(mb_start + minibatch, batch_size)
+            mb_input_ids = input_ids[mb_start:mb_end]
+            mb_attention_mask = attention_mask[mb_start:mb_end] if attention_mask is not None else None
+            mb_position_ids = position_ids[mb_start:mb_end] if position_ids is not None else None
+
+            hidden_states = None
+            mb_hidden_states = []
+            mb_self_attns = []
 
             for i, (layer_name, layer) in tqdm(enumerate(zip(self.layer_names, self.layers)),
-                                            desc=f'running layers({self.running_device})',
-                                            total=len(self.layers)):
+                                               desc=f'running layers({self.running_device})',
+                                               total=len(self.layers)):
                 if self.prefetching:
                     state_dict = future.result()
                     moved_layers = self.move_layer_to_device(state_dict)
@@ -418,31 +429,32 @@ class AirLLMBaseModel(GenerationMixin):
                     moved_layers = self.move_layer_to_device(state_dict)
 
                 if layer_name == self.layer_names_dict['embed']:
-                    hidden_states = layer(input_ids)
+                    hidden_states = layer(mb_input_ids)
                 elif layer_name == self.layer_names_dict['norm']:
-                    print(layer)
                     hidden_states = self.run_norm(layer, hidden_states)
                 elif layer_name == self.layer_names_dict['lm_head']:
-                    logits = self.run_lm_head(layer, hidden_states, top_k)
+                    mb_logits = self.run_lm_head(layer, hidden_states, top_k)
+                    all_logits.append(mb_logits)
                 else:
-                    print(layer.self_attn)
                     layer_outputs = layer(
                         hidden_states,
-                        #attention_mask=attention_mask,
-                        position_ids=position_ids,
-                        past_key_value=past_key_values[i-1] if past_key_values is not None else None,
+                        attention_mask=mb_attention_mask,
+                        position_ids=mb_position_ids,
+                        past_key_value=past_key_values[i-1][mb_start:mb_end] if past_key_values is not None else None,
                         use_cache=use_cache,
                         output_attentions=output_attentions
                     )
                     hidden_states = layer_outputs[0]
 
                     if use_cache:
-                        kv_cache_list.append(layer_outputs[1])
+                        if len(kv_cache_list) <= i-1:
+                            kv_cache_list.append([])
+                        kv_cache_list[i-1].append(layer_outputs[1])
                     if output_attentions:
-                        all_self_attns.append(layer_outputs[1] if use_cache else layer_outputs[2])
+                        mb_self_attns.append(layer_outputs[1] if use_cache else layer_outputs[2])
 
                 if output_hidden_states:
-                    all_hidden_states.append(hidden_states)
+                    mb_hidden_states.append(hidden_states)
 
                 # Remove previous layer from memory (including buffers)
                 if self.hf_quantizer is not None:
@@ -453,13 +465,27 @@ class AirLLMBaseModel(GenerationMixin):
 
                 clean_memory()
 
-        if not return_dict:
-            return tuple(v for v in [logits, kv_cache_list, all_hidden_states, all_self_attns] if v is not None)
+            if output_hidden_states:
+                all_hidden_states.append(mb_hidden_states)
+            if output_attentions:
+                all_self_attns.append(mb_self_attns)
 
-        return CausalLMOutputWithPast(
-            loss=None,
-            logits=logits,
-            past_key_values=tuple(kv_cache_list) if kv_cache_list is not None else None,
-            hidden_states=tuple(all_hidden_states) if all_hidden_states is not None else None,
-            attentions=tuple(all_self_attns) if all_hidden_states is not None else None,
-        )
+    # Combine minibatch results
+    logits = torch.cat(all_logits, dim=0)
+    if use_cache:
+        kv_cache_list = [torch.cat(cache, dim=0) for cache in kv_cache_list]
+    if output_hidden_states:
+        all_hidden_states = [torch.cat([mb[i] for mb in all_hidden_states], dim=0) for i in range(len(all_hidden_states[0]))]
+    if output_attentions:
+        all_self_attns = [torch.cat([mb[i] for mb in all_self_attns], dim=0) for i in range(len(all_self_attns[0]))]
+
+    if not return_dict:
+        return tuple(v for v in [logits, kv_cache_list, all_hidden_states, all_self_attns] if v is not None)
+
+    return CausalLMOutputWithPast(
+        loss=None,
+        logits=logits,
+        past_key_values=tuple(kv_cache_list) if kv_cache_list is not None else None,
+        hidden_states=tuple(all_hidden_states) if all_hidden_states is not None else None,
+        attentions=tuple(all_self_attns) if all_hidden_states is not None else None,
+    )
