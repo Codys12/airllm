@@ -120,7 +120,7 @@ class AirLLMBaseModel(GenerationMixin):
         if hf_token is not None:
             self.config = AutoConfig.from_pretrained(self.model_local_path, token=hf_token, trust_remote_code=True)
         else:
-            self.config = AutoConfig.from_pretrained(self.model_local_path, trust_remote_code=True)
+            self.config = AutoConfig.from_pretrained(self.model_local_path, trust_remote_code=True, load_in_8bit=True)
 
         self.generation_config = self.get_generation_config()
         #print(f"using generation_config: {self.generation_config}")
@@ -416,11 +416,11 @@ class AirLLMBaseModel(GenerationMixin):
                 else:
                     state_dict = self.load_layer_to_cpu(layer_name)
                     moved_layers = self.move_layer_to_device(state_dict)
-                    print("YO")
 
                 if layer_name == self.layer_names_dict['embed']:
                     hidden_states = layer(input_ids)
                 elif layer_name == self.layer_names_dict['norm']:
+                    print(layer)
                     hidden_states = self.run_norm(layer, hidden_states)
                 elif layer_name == self.layer_names_dict['lm_head']:
                     logits = self.run_lm_head(layer, hidden_states, top_k)
