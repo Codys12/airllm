@@ -120,6 +120,7 @@ class AirLLMBaseModel(GenerationMixin):
         if hf_token is not None:
             self.config = AutoConfig.from_pretrained(self.model_local_path, token=hf_token, trust_remote_code=True)
         else:
+            print("HI")
             self.config = AutoConfig.from_pretrained(self.model_local_path, trust_remote_code=True, load_in_4bit=True, attn_implementation="flash_attention_2")
 
         self.generation_config = self.get_generation_config()
@@ -425,17 +426,16 @@ class AirLLMBaseModel(GenerationMixin):
                 elif layer_name == self.layer_names_dict['lm_head']:
                     logits = self.run_lm_head(layer, hidden_states, top_k)
                 else:
-                    with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=True), torch.no_grad():
-                        print(layer.self_attn)
-                        layer_outputs = layer(
-                            hidden_states,
-                            #attention_mask=attention_mask,
-                            position_ids=position_ids,
-                            past_key_value=past_key_values[i-1] if past_key_values is not None else None,
-                            use_cache=use_cache,
-                            output_attentions=output_attentions
-                        )
-                        hidden_states = layer_outputs[0]
+                    print(layer.self_attn)
+                    layer_outputs = layer(
+                        hidden_states,
+                        #attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_value=past_key_values[i-1] if past_key_values is not None else None,
+                        use_cache=use_cache,
+                        output_attentions=output_attentions
+                    )
+                    hidden_states = layer_outputs[0]
 
                     if use_cache:
                         kv_cache_list.append(layer_outputs[1])
