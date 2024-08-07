@@ -437,7 +437,7 @@ class AirLLMBaseModel(GenerationMixin):
                         batch_attention_mask = attention_mask[j:batch_end] if attention_mask is not None else None
                         batch_position_ids = position_ids[j:batch_end] if position_ids is not None else None
                         batch_past_key_value = past_key_values[i-1][j:batch_end] if past_key_values is not None else None
-
+                        print(j)
                         layer_outputs = layer(
                             batch_input,
                             #attention_mask=batch_attention_mask,
