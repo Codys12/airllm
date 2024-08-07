@@ -430,7 +430,7 @@ class AirLLMBaseModel(GenerationMixin):
                         torch.cuda.empty_cache()
 
                     print("MADE IT HERE")
-                    hidden_states = torch.cat(new_hidden_states, dim=0)
+                    hidden_states = new_hidden_states
                     del batch_hidden_states
                     torch.cuda.empty_cache()
 
