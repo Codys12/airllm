@@ -435,9 +435,26 @@ class AirLLMBaseModel(GenerationMixin):
                     torch.cuda.empty_cache()
 
                 elif layer_name == self.layer_names_dict['norm']:
-                    hidden_states = self.run_norm(layer, hidden_states)
+                    new_hidden_states = []
+
+                    for j in range(len(hidden_states)):
+                        batch_input = hidden_states[j]
+                        layer_outputs = layer(batch_input)
+                        new_hidden_states.append(layer_outputs)
+                        del hidden_states[j]
+
+                    print("MADE IT HERE")
+                    hidden_states = new_hidden_states
+                    del batch_hidden_states
                 elif layer_name == self.layer_names_dict['lm_head']:
-                    logits = self.run_lm_head(layer, hidden_states, top_k)
+                    logits = []
+
+                    for j in range(len(hidden_states)):
+                        batch_input = hidden_states[j]
+                        layer_outputs = self.run_lm_head(layer, hidden_states, top_k).to("cpu")
+                        new_hidden_states.append(layer_outputs)
+                        del hidden_states[j]
+                    logits = torch.cat(logits, dim=0)
                 else:
                     if not isinstance(hidden_states, list):
                             hidden_states = [hidden_states[j:j+minibatch] for j in range(0, batch_size, minibatch)]
