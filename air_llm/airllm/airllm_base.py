@@ -418,18 +418,26 @@ class AirLLMBaseModel(GenerationMixin):
                     moved_layers = self.move_layer_to_device(state_dict)
 
                 if layer_name == self.layer_names_dict['embed']:
-                    hidden_states = layer(input_ids)
+                    batch_hidden_states = []
+
+                    for j in range(0, batch_size, minibatch):
+                        batch_end = min(j + minibatch, batch_size)
+                        batch_input = input_ids[j:batch_end]
+                        layer_outputs = layer(batch_input)
+                        batch_hidden_states.append(layer_outputs)
+                    hidden_states = torch.cat(batch_hidden_states, dim=0)
                 elif layer_name == self.layer_names_dict['norm']:
                     print(layer)
                     hidden_states = self.run_norm(layer, hidden_states)
                 elif layer_name == self.layer_names_dict['lm_head']:
                     logits = self.run_lm_head(layer, hidden_states, top_k)
                 else:
+                    # Process in batches of 25
                     batch_hidden_states = []
 
                     for j in range(0, batch_size, minibatch):
                         batch_end = min(j + minibatch, batch_size)
-                        batch_input = hidden_states.narrow(0, j, batch_end - j)
+                        batch_input = hidden_states[j:batch_end]
                         batch_past_key_value = past_key_values[i-1][j:batch_end] if past_key_values is not None else None
                         layer_outputs = layer(
                             batch_input,
@@ -439,9 +447,7 @@ class AirLLMBaseModel(GenerationMixin):
                             use_cache=use_cache,
                             output_attentions=output_attentions
                         )
-                        # Delete the processed section of hidden_states
-                        del batch_input
-                        torch.cuda.empty_cache()
+
                         batch_hidden_states.append(layer_outputs[0])
 
                         if use_cache:
