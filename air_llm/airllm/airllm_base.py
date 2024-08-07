@@ -443,7 +443,7 @@ class AirLLMBaseModel(GenerationMixin):
                             hidden_states = [hidden_states[j:j+minibatch] for j in range(0, batch_size, minibatch)]
                     new_hidden_states = []
 
-                    for j in range(hidden_states):
+                    for j in range(len(hidden_states)):
                         batch_input = hidden_states[j]
                         batch_past_key_value = past_key_values[i-1][j*minibatch:(j+1)*minibatch] if past_key_values is not None else None
                         layer_outputs = layer(
