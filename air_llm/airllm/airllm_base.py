@@ -445,7 +445,7 @@ class AirLLMBaseModel(GenerationMixin):
 
                     print("MADE IT HERE")
                     hidden_states = new_hidden_states
-                    del batch_hidden_states
+
                 elif layer_name == self.layer_names_dict['lm_head']:
                     logits = []
 
