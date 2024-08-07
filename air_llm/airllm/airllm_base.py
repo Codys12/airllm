@@ -425,13 +425,11 @@ class AirLLMBaseModel(GenerationMixin):
                 elif layer_name == self.layer_names_dict['lm_head']:
                     logits = self.run_lm_head(layer, hidden_states, top_k)
                 else:
-                    print(hidden_states.shape)
-                    # Process in batches of 25
                     batch_hidden_states = []
 
                     for j in range(0, batch_size, minibatch):
                         batch_end = min(j + minibatch, batch_size)
-                        batch_input = hidden_states[j:batch_end]
+                        batch_input = hidden_states.narrow(0, j, batch_end - j)
                         batch_past_key_value = past_key_values[i-1][j:batch_end] if past_key_values is not None else None
                         layer_outputs = layer(
                             batch_input,
@@ -442,8 +440,8 @@ class AirLLMBaseModel(GenerationMixin):
                             output_attentions=output_attentions
                         )
                         # Delete the processed section of hidden_states
-                        del hidden_states[j:batch_end]
-                        torch.cuda.empty_cache()  # Free up CUDA memory if using GPU
+                        del batch_input
+                        torch.cuda.empty_cache()
                         batch_hidden_states.append(layer_outputs[0])
 
                         if use_cache:
