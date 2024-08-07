@@ -425,37 +425,47 @@ class AirLLMBaseModel(GenerationMixin):
                         batch_input = input_ids[j:batch_end]
                         layer_outputs = layer(batch_input)
                         batch_hidden_states.append(layer_outputs)
+                        del batch_input
+                        torch.cuda.empty_cache()
+
                     hidden_states = torch.cat(batch_hidden_states, dim=0)
+                    del batch_hidden_states
+                    torch.cuda.empty_cache()
+
                 elif layer_name == self.layer_names_dict['norm']:
-                    print(layer)
                     hidden_states = self.run_norm(layer, hidden_states)
                 elif layer_name == self.layer_names_dict['lm_head']:
                     logits = self.run_lm_head(layer, hidden_states, top_k)
                 else:
-                    # Process in batches of 25
-                    batch_hidden_states = []
+                    # Process in batches of minibatch size
+                    batch_hidden_states = [hidden_states[j:j+minibatch] for j in range(0, batch_size, minibatch)]
+                    del hidden_states
+                    torch.cuda.empty_cache()
+                    new_hidden_states = []
 
-                    for j in range(0, batch_size, minibatch):
-                        batch_end = min(j + minibatch, batch_size)
-                        batch_input = hidden_states[j:batch_end]
-                        batch_past_key_value = past_key_values[i-1][j:batch_end] if past_key_values is not None else None
+                    for j, batch_input in enumerate(batch_hidden_states):
+                        batch_past_key_value = past_key_values[i-1][j*minibatch:(j+1)*minibatch] if past_key_values is not None else None
                         layer_outputs = layer(
                             batch_input,
-                            #attention_mask=batch_attention_mask,
                             position_ids=position_ids,
                             past_key_value=batch_past_key_value,
                             use_cache=use_cache,
                             output_attentions=output_attentions
                         )
 
-                        batch_hidden_states.append(layer_outputs[0])
+                        new_hidden_states.append(layer_outputs[0])
 
                         if use_cache:
                             kv_cache_list.append(layer_outputs[1])
                         if output_attentions:
                             all_self_attns.append(layer_outputs[1] if use_cache else layer_outputs[2])
 
-                    hidden_states = torch.cat(batch_hidden_states, dim=0)
+                        del batch_input
+                        torch.cuda.empty_cache()
+
+                    hidden_states = torch.cat(new_hidden_states, dim=0)
+                    del new_hidden_states
+                    torch.cuda.empty_cache()
 
                 if output_hidden_states:
                     all_hidden_states.append(hidden_states)
