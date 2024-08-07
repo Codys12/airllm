@@ -418,10 +418,10 @@ class AirLLMBaseModel(GenerationMixin):
 
                 if layer_name == self.layer_names_dict['embed']:
                     hidden_states = layer(input_ids)
-                    print(hidden_states)
-                    print(hidden_states.shape)
                 elif layer_name == self.layer_names_dict['norm']:
                     hidden_states = self.run_norm(layer, hidden_states)
+                    print(hidden_states)
+                    print(hidden_states.shape)
                 elif layer_name == self.layer_names_dict['lm_head']:
                     logits = self.run_lm_head(layer, hidden_states, top_k)
                 else:
