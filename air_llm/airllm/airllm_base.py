@@ -376,7 +376,6 @@ class AirLLMBaseModel(GenerationMixin):
             output_hidden_states: Optional[bool] = None,
             return_dict: Optional[bool] = None,
             top_k: int = 5,
-            minibatch: int = 1,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if cache_utils_installed:
             use_cache = False
@@ -421,50 +420,31 @@ class AirLLMBaseModel(GenerationMixin):
                 if layer_name == self.layer_names_dict['embed']:
                     hidden_states = layer(input_ids)
                 elif layer_name == self.layer_names_dict['norm']:
+                    print(layer)
                     hidden_states = self.run_norm(layer, hidden_states)
                 elif layer_name == self.layer_names_dict['lm_head']:
-                    logits = []
-                    for mb_start in range(0, batch_size, minibatch):
-                        mb_end = min(mb_start + minibatch, batch_size)
-                        mb_hidden_states = hidden_states[mb_start:mb_end]
-                        logits.append(self.run_lm_head(layer, mb_hidden_states, top_k))
-                    logits = torch.cat(logits, dim=0)
+                    logits = self.run_lm_head(layer, hidden_states, top_k)
                 else:
-                    new_hidden_states = []
-                    layer_kv_cache = []
-                    layer_self_attns = []
-                    for mb_start in range(0, batch_size, minibatch):
-                        mb_end = min(mb_start + minibatch, batch_size)
-                        mb_hidden_states = hidden_states[mb_start:mb_end]
-                        mb_attention_mask = attention_mask[mb_start:mb_end] if attention_mask is not None else None
-                        mb_position_ids = position_ids[mb_start:mb_end] if position_ids is not None else None
-                        mb_past_key_value = past_key_values[i-1][mb_start:mb_end] if past_key_values is not None else None
+                    print(layer.self_attn)
+                    layer_outputs = layer(
+                        hidden_states,
+                        #attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_value=past_key_values[i-1] if past_key_values is not None else None,
+                        use_cache=use_cache,
+                        output_attentions=output_attentions
+                    )
+                    hidden_states = layer_outputs[0]
 
-                        layer_outputs = layer(
-                            mb_hidden_states,
-                            #attention_mask=mb_attention_mask,
-                            position_ids=mb_position_ids,
-                            past_key_value=mb_past_key_value,
-                            use_cache=use_cache,
-                            output_attentions=output_attentions
-                        )
-                        new_hidden_states.append(layer_outputs[0])
-
-                        if use_cache:
-                            layer_kv_cache.append(layer_outputs[1])
-                        if output_attentions:
-                            layer_self_attns.append(layer_outputs[1] if use_cache else layer_outputs[2])
-
-                    hidden_states = torch.cat(new_hidden_states, dim=0)
                     if use_cache:
-                        kv_cache_list.append(torch.cat(layer_kv_cache, dim=0))
+                        kv_cache_list.append(layer_outputs[1])
                     if output_attentions:
-                        all_self_attns.append(torch.cat(layer_self_attns, dim=0))
+                        all_self_attns.append(layer_outputs[1] if use_cache else layer_outputs[2])
 
                 if output_hidden_states:
                     all_hidden_states.append(hidden_states)
 
-                # Remove layer from memory (including buffers)
+                # Remove previous layer from memory (including buffers)
                 if self.hf_quantizer is not None:
                     for param_name in moved_layers:
                         set_module_tensor_to_device(self.model, param_name, 'meta')
