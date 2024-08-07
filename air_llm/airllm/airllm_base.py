@@ -419,12 +419,7 @@ class AirLLMBaseModel(GenerationMixin):
                     moved_layers = self.move_layer_to_device(state_dict)
 
                 if layer_name == self.layer_names_dict['embed']:
-                    hidden_states = []
-                    for mb_start in range(0, batch_size, minibatch):
-                        mb_end = min(mb_start + minibatch, batch_size)
-                        mb_input_ids = input_ids[mb_start:mb_end]
-                        hidden_states.append(layer(mb_input_ids))
-                    hidden_states = torch.cat(hidden_states, dim=0)
+                    hidden_states = layer(input_ids)
                 elif layer_name == self.layer_names_dict['norm']:
                     hidden_states = self.run_norm(layer, hidden_states)
                 elif layer_name == self.layer_names_dict['lm_head']:
