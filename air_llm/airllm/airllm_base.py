@@ -375,6 +375,7 @@ class AirLLMBaseModel(GenerationMixin):
             output_hidden_states: Optional[bool] = None,
             return_dict: Optional[bool] = None,
             top_k: int = 5,
+            minibatch: int = 25,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if cache_utils_installed:
             use_cache = False
@@ -428,13 +429,10 @@ class AirLLMBaseModel(GenerationMixin):
                     # Process in batches of 25
                     batch_hidden_states = []
 
-                    for j in range(0, batch_size, 25):
-                        batch_end = min(j + 25, batch_size)
+                    for j in range(0, batch_size, minibatch):
+                        batch_end = min(j + minibatch, batch_size)
                         batch_input = hidden_states[j:batch_end]
-                        print(batch_input.shape)
-                        batch_attention_mask = attention_mask[j:batch_end] if attention_mask is not None else None
                         batch_past_key_value = past_key_values[i-1][j:batch_end] if past_key_values is not None else None
-                        print(j)
                         layer_outputs = layer(
                             batch_input,
                             #attention_mask=batch_attention_mask,
