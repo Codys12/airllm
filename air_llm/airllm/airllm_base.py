@@ -460,8 +460,8 @@ class AirLLMBaseModel(GenerationMixin):
                         if output_attentions:
                             all_self_attns.append(layer_outputs[1] if use_cache else layer_outputs[2])
 
-                        del batch_input
-                        torch.cuda.empty_cache()
+                        #del batch_input
+                        #torch.cuda.empty_cache()
 
                     hidden_states = new_hidden_states
                     torch.cuda.empty_cache()
