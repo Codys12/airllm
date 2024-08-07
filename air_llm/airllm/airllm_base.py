@@ -452,7 +452,7 @@ class AirLLMBaseModel(GenerationMixin):
                     for j in range(len(hidden_states)):
                         batch_input = hidden_states[j]
                         layer_outputs = self.run_lm_head(layer, batch_input, top_k).to("cpu")
-                        new_hidden_states.append(layer_outputs)
+                        logits.append(layer_outputs)
                         del hidden_states[j]
                     logits = torch.cat(logits, dim=0)
                 else:
