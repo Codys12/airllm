@@ -423,7 +423,6 @@ class AirLLMBaseModel(GenerationMixin):
                 elif layer_name == self.layer_names_dict['lm_head']:
                     logits = self.run_lm_head(layer, hidden_states, top_k)
                 else:
-                    print(layer.self_attn)
                     layer_outputs = layer(
                         hidden_states,
                         #attention_mask=attention_mask,
