@@ -418,17 +418,19 @@ class AirLLMBaseModel(GenerationMixin):
                     moved_layers = self.move_layer_to_device(state_dict)
 
                 if layer_name == self.layer_names_dict['embed']:
-                    batch_hidden_states = []
+                    batch_hidden_states = [input_ids[j:j+minibatch] for j in range(0, batch_size, minibatch)]
+                    new_hidden_states = []
 
                     for j in range(0, batch_size, minibatch):
                         batch_end = min(j + minibatch, batch_size)
                         batch_input = input_ids[j:batch_end]
                         layer_outputs = layer(batch_input)
-                        batch_hidden_states.append(layer_outputs)
+                        new_hidden_states.append(layer_outputs)
                         del batch_input
                         torch.cuda.empty_cache()
 
-                    hidden_states = torch.cat(batch_hidden_states, dim=0)
+                    print("MADE IT HERE")
+                    hidden_states = torch.cat(new_hidden_states, dim=0)
                     del batch_hidden_states
                     torch.cuda.empty_cache()
 
