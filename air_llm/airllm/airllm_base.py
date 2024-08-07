@@ -433,6 +433,7 @@ class AirLLMBaseModel(GenerationMixin):
                     for j in range(0, batch_size, 25):
                         batch_end = min(j + 25, batch_size)
                         batch_input = hidden_states[j:batch_end]
+                        print(batch_input.shape)
                         batch_attention_mask = attention_mask[j:batch_end] if attention_mask is not None else None
                         batch_position_ids = position_ids[j:batch_end] if position_ids is not None else None
                         batch_past_key_value = past_key_values[i-1][j:batch_end] if past_key_values is not None else None
