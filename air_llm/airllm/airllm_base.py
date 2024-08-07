@@ -441,6 +441,9 @@ class AirLLMBaseModel(GenerationMixin):
                             use_cache=use_cache,
                             output_attentions=output_attentions
                         )
+                        # Delete the processed section of hidden_states
+                        del hidden_states[j:batch_end]
+                        torch.cuda.empty_cache()  # Free up CUDA memory if using GPU
                         batch_hidden_states.append(layer_outputs[0])
 
                         if use_cache:
