@@ -426,7 +426,7 @@ class AirLLMBaseModel(GenerationMixin):
                     logits = self.run_lm_head(layer, hidden_states, top_k)
                 else:
                     print(layer.self_attn)
-                    print(hidden_states)
+                    print(hidden_states.shape)
                     # Process in batches of 25
                     batch_hidden_states = []
 
