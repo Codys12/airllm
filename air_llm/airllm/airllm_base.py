@@ -426,20 +426,31 @@ class AirLLMBaseModel(GenerationMixin):
                     logits = self.run_lm_head(layer, hidden_states, top_k)
                 else:
                     print(layer.self_attn)
-                    layer_outputs = layer(
-                        hidden_states,
-                        #attention_mask=attention_mask,
-                        position_ids=position_ids,
-                        past_key_value=past_key_values[i-1] if past_key_values is not None else None,
-                        use_cache=use_cache,
-                        output_attentions=output_attentions
-                    )
-                    hidden_states = layer_outputs[0]
+                    # Process in batches of 25
+                    batch_hidden_states = []
+                    for j in range(0, batch_size, 25):
+                        batch_end = min(j + 25, batch_size)
+                        batch_input = hidden_states[j:batch_end]
+                        batch_attention_mask = attention_mask[j:batch_end] if attention_mask is not None else None
+                        batch_position_ids = position_ids[j:batch_end] if position_ids is not None else None
+                        batch_past_key_value = past_key_values[i-1][j:batch_end] if past_key_values is not None else None
 
-                    if use_cache:
-                        kv_cache_list.append(layer_outputs[1])
-                    if output_attentions:
-                        all_self_attns.append(layer_outputs[1] if use_cache else layer_outputs[2])
+                        layer_outputs = layer(
+                            batch_input,
+                            #attention_mask=batch_attention_mask,
+                            position_ids=batch_position_ids,
+                            past_key_value=batch_past_key_value,
+                            use_cache=use_cache,
+                            output_attentions=output_attentions
+                        )
+                        batch_hidden_states.append(layer_outputs[0])
+
+                        if use_cache:
+                            kv_cache_list.append(layer_outputs[1])
+                        if output_attentions:
+                            all_self_attns.append(layer_outputs[1] if use_cache else layer_outputs[2])
+
+                    hidden_states = torch.cat(batch_hidden_states, dim=0)
 
                 if output_hidden_states:
                     all_hidden_states.append(hidden_states)
