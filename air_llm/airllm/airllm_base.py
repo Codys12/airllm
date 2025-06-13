@@ -339,7 +339,21 @@ class AirLLMBaseModel(GenerationMixin):
         return {'past_key_value': (k_cache, v_cache)}
 
     def get_attention_mask_args(self, full_attention_mask, len_p, len_s):
-        return {'attention_mask': full_attention_mask[:, :, -len_s:, -len_p - len_s:]}
+        """
+        Ensure the mask is 4-D: (batch, 1, query_len, key_len).
+        Users often pass a 2-D mask shaped (B, L); older forks sometimes pass
+        (B, 1, L).  Both lead to an IndexError when we slice with four indices.
+        """
+        if full_attention_mask.dim() == 2:
+            # (B, L) ➜ (B, 1, 1, L)
+            full_attention_mask = full_attention_mask[:, None, None, :]
+        elif full_attention_mask.dim() == 3:
+            # (B, 1, L) ➜ (B, 1, L, L) – broadcastable on query axis
+            full_attention_mask = full_attention_mask[:, None, :, :]
+
+        return {
+            "attention_mask": full_attention_mask[:, :, -len_s:, -len_p - len_s:]
+        }
 
     def get_position_ids_args(self, full_position_ids, len_p, len_s):
 
@@ -386,12 +400,6 @@ class AirLLMBaseModel(GenerationMixin):
             position_ids = position_ids.to(self.running_device)
 
         batch_size, seq_len = input_ids.shape
-
-        len_p = (
-            self.get_past_key_values_cache_seq_len(past_key_values)
-            if past_key_values is not None
-            else 0
-        )
 
         # Create attention mask and position ids if not provided
         if attention_mask is None:
@@ -464,35 +472,13 @@ class AirLLMBaseModel(GenerationMixin):
 
                     for j in range(len(hidden_states)):
                         batch_input = hidden_states[j]
-                        batch_past_key_value = (
-                            past_key_values[i - 1][j * minibatch : (j + 1) * minibatch]
-                            if past_key_values is not None
-                            else None
-                        )
-
-                        len_s = self.get_sequence_len(batch_input)
-
-                        pos_emb_args = self.get_pos_emb_args(len_p, len_s)
-                        pkv_args = (
-                            self.get_past_key_value_args(batch_past_key_value[0], batch_past_key_value[1])
-                            if batch_past_key_value is not None
-                            else self.get_past_key_value_args(None, None)
-                        )
-                        attn_mask_args = self.get_attention_mask_args(
-                            attention_mask, len_p, len_s
-                        )
-                        pos_ids_args = self.get_position_ids_args(
-                            position_ids, len_p, len_s
-                        )
-
+                        batch_past_key_value = past_key_values[i-1][j*minibatch:(j+1)*minibatch] if past_key_values is not None else None
                         layer_outputs = layer(
                             batch_input,
-                            **pos_ids_args,
-                            **pkv_args,
-                            **attn_mask_args,
-                            **pos_emb_args,
+                            position_ids=position_ids,
+                            past_key_value=batch_past_key_value,
                             use_cache=use_cache,
-                            output_attentions=output_attentions,
+                            output_attentions=output_attentions
                         )
 
                         new_hidden_states.append(layer_outputs[0])
