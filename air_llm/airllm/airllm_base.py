@@ -387,6 +387,12 @@ class AirLLMBaseModel(GenerationMixin):
 
         batch_size, seq_len = input_ids.shape
 
+        len_p = (
+            self.get_past_key_values_cache_seq_len(past_key_values)
+            if past_key_values is not None
+            else 0
+        )
+
         # Create attention mask and position ids if not provided
         if attention_mask is None:
             attention_mask = torch.ones(self.max_seq_len, self.max_seq_len, device=self.running_device)
@@ -458,13 +464,35 @@ class AirLLMBaseModel(GenerationMixin):
 
                     for j in range(len(hidden_states)):
                         batch_input = hidden_states[j]
-                        batch_past_key_value = past_key_values[i-1][j*minibatch:(j+1)*minibatch] if past_key_values is not None else None
+                        batch_past_key_value = (
+                            past_key_values[i - 1][j * minibatch : (j + 1) * minibatch]
+                            if past_key_values is not None
+                            else None
+                        )
+
+                        len_s = self.get_sequence_len(batch_input)
+
+                        pos_emb_args = self.get_pos_emb_args(len_p, len_s)
+                        pkv_args = (
+                            self.get_past_key_value_args(batch_past_key_value[0], batch_past_key_value[1])
+                            if batch_past_key_value is not None
+                            else self.get_past_key_value_args(None, None)
+                        )
+                        attn_mask_args = self.get_attention_mask_args(
+                            attention_mask, len_p, len_s
+                        )
+                        pos_ids_args = self.get_position_ids_args(
+                            position_ids, len_p, len_s
+                        )
+
                         layer_outputs = layer(
                             batch_input,
-                            position_ids=position_ids,
-                            past_key_value=batch_past_key_value,
+                            **pos_ids_args,
+                            **pkv_args,
+                            **attn_mask_args,
+                            **pos_emb_args,
                             use_cache=use_cache,
-                            output_attentions=output_attentions
+                            output_attentions=output_attentions,
                         )
 
                         new_hidden_states.append(layer_outputs[0])
