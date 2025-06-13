@@ -34,5 +34,18 @@ class SafetensorModelPersister(ModelPersister):
 
 
     def load_model(self, layer_name, path):
-        layer_state_dict = load_file(Path(path) / (layer_name + ".safetensors"), device="cpu")
+        file_path = Path(path) / (layer_name + ".safetensors")
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Layer file {file_path} not found")
+
+        try:
+            layer_state_dict = load_file(file_path, device="cpu")
+        except Exception as ex:
+            raise RuntimeError(f"Failed to load layer file {file_path}: {ex}") from ex
+
+        if not isinstance(layer_state_dict, dict) or len(layer_state_dict) == 0:
+            raise RuntimeError(
+                f"Layer file {file_path} appears corrupted or empty"
+            )
+
         return layer_state_dict

@@ -234,6 +234,16 @@ class AirLLMBaseModel(GenerationMixin):
         state_dict = load_layer(self.checkpoint_path, self.layer_names_dict['rotary_pos_emb'])
         self.move_layer_to_device(state_dict)
 
+    def _expected_layer_keys(self, layer_name):
+        keys = []
+        for name, _ in self.model.named_parameters():
+            if name.startswith(layer_name):
+                keys.append(name)
+        for name, _ in self.model.named_buffers():
+            if name.startswith(layer_name):
+                keys.append(name)
+        return keys
+
     def load_layer_to_cpu(self, layer_name):
 
         t = time.time()
@@ -250,6 +260,18 @@ class AirLLMBaseModel(GenerationMixin):
             self.profiler.add_profiling_time('compression_time', compression_time)
         else:
             state_dict = load_layer_output
+
+        if not state_dict:
+            raise RuntimeError(
+                f"Layer file {layer_name} returned an empty state dict. File may be corrupted."
+            )
+
+        expected = self._expected_layer_keys(layer_name)
+        missing = [k for k in expected if k not in state_dict]
+        if missing:
+            raise RuntimeError(
+                f"Layer file {layer_name} missing keys: {missing}. File may be corrupted."
+            )
 
         # pin memory:
         if self.prefetching:
@@ -275,15 +297,65 @@ class AirLLMBaseModel(GenerationMixin):
                         layers.append(layer_name)
 
         for param_name in layers:
-            if (self.hf_quantizer is None or
-                not self.hf_quantizer.check_quantized_param(self.model, param_value=None, param_name=param_name, state_dict={})
-               ):
-                set_module_tensor_to_device(self.model, param_name, self.running_device, value=state_dict[param_name],
-                                            dtype=self.running_dtype,
-                                            )
+            if (
+                self.hf_quantizer is None
+                or not self.hf_quantizer.check_quantized_param(
+                    self.model, param_value=None, param_name=param_name, state_dict={}
+                )
+            ):
+                set_module_tensor_to_device(
+                    self.model,
+                    param_name,
+                    self.running_device,
+                    value=state_dict[param_name],
+                    dtype=self.running_dtype,
+                )
             else:
                 torch_dtype = self.hf_quantizer.update_torch_dtype(None)
-                self.hf_quantizer.create_quantized_param(self.model, state_dict[param_name], param_name, self.running_device, state_dict)
+                self.hf_quantizer.create_quantized_param(
+                    self.model,
+                    state_dict[param_name],
+                    param_name,
+                    self.running_device,
+                    state_dict,
+                )
+
+        # verify that all moved parameters actually reside on the running device
+        def _get_attr(model, name):
+            attrs = name.split(".")
+            mod = model
+            for attr in attrs:
+                if attr.isdigit():
+                    mod = mod[int(attr)]
+                else:
+                    mod = getattr(mod, attr)
+            return mod
+
+        not_loaded = []
+        for param_name in layers:
+            try:
+                param = _get_attr(self.model, param_name)
+                if getattr(param, "device", self.device) == torch.device("meta"):
+                    # attempt one more time in case the first call silently failed
+                    set_module_tensor_to_device(
+                        self.model,
+                        param_name,
+                        self.running_device,
+                        value=state_dict[param_name],
+                        dtype=self.running_dtype,
+                    )
+                    param = _get_attr(self.model, param_name)
+                    if getattr(param, "device", self.device) == torch.device("meta"):
+                        not_loaded.append(param_name)
+            except AttributeError:
+                not_loaded.append(param_name)
+
+        if not_loaded:
+            raise RuntimeError(
+                f"Parameters not properly loaded to device: {not_loaded}. "
+                "Check that the layer files exist and are not corrupted."
+            )
+
         return layers
 
     # make GenerationMixin happy
