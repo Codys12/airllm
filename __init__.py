@@ -1,6 +1,6 @@
 from importlib import import_module as _imp
 
-_module = _imp("air_llm")          # pull in the real library
+_module = _imp(".air_llm")          # pull in the real library
 globals().update(_module.__dict__) # re-export everything
 
 # Optional niceties
