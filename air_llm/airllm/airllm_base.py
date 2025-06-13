@@ -365,14 +365,36 @@ class AirLLMBaseModel(GenerationMixin):
         return {'position_ids': full_position_ids[:, len_p:len_p + len_s]}
 
 
-    def run_lm_head(self, layer, seq, top_k=5):
+    def run_lm_head(self, layer, seq, num_samples=32):
         batch_size, seq_len, hidden_dim = seq.shape
         results = []
         
         for i in range(batch_size):
-            logits = layer(seq[i]).float()  # Process each sequence individually
-            top_logprobs, top_indices = torch.topk(logits.log_softmax(-1), k=top_k, dim=-1)
-            results.append(torch.stack([top_logprobs, top_indices.float()], dim=-2))
+            logits_i = layer(seq[i]).float()                     # [seq_len, vocab]
+            probs_i  = torch.softmax(logits_i, dim=-1)
+            probs_i  = torch.nan_to_num(probs_i,
+                                        nan=0.0, posinf=0.0, neginf=0.0)
+
+            # one multinomial call covers the *whole* sequence
+            samples  = torch.multinomial(
+                probs_i, num_samples, replacement=True
+            )                                                    # [seq_len, num_samples]
+
+            # gather counts per position
+            ids_out     = torch.full_like(samples, -1)
+            counts_out  = torch.zeros_like(samples)
+            for t in range(samples.size(0)):                     # tiny inner loop, seq_len
+                uniq_ids, uniq_counts = torch.unique(
+                    samples[t], return_counts=True
+                )
+                k = min(num_samples, uniq_ids.size(0))
+                ids_out[ t, :k ]    = uniq_ids[   :k ]
+                counts_out[t, :k ]  = uniq_counts[:k ]
+
+            pos_results = torch.stack(
+                [ids_out.float(), counts_out.float()], dim=1
+            )                                                    # [seq_len, 2, num_samples]
+            results.append(pos_results)
         
         return torch.stack(results)  # Shape: [batch_size, seq_len, 2, top_k]
 
@@ -391,8 +413,8 @@ class AirLLMBaseModel(GenerationMixin):
             output_attentions: Optional[bool] = None,
             output_hidden_states: Optional[bool] = None,
             return_dict: Optional[bool] = None,
-            top_k: int = 5,
-            minibatch: int = 25,
+            num_samples: int = 32,
+            minibatch: int = 32,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         if cache_utils_installed:
             use_cache = False
@@ -466,7 +488,7 @@ class AirLLMBaseModel(GenerationMixin):
 
                     for j in range(len(hidden_states)):
                         batch_input = hidden_states[j]
-                        layer_outputs = self.run_lm_head(layer, batch_input, top_k).to("cpu")
+                        layer_outputs = self.run_lm_head(layer, batch_input, num_samples).to("cpu")
                         logits.append(layer_outputs)
                         hidden_states[j] = None
                     logits = torch.cat(logits, dim=0)
