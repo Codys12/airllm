@@ -45,10 +45,15 @@ class AirLLMBaseModel(GenerationMixin):
 
     # customize layer names here
     def set_layer_names_dict(self):
-        self.layer_names_dict = {'embed': 'model.embed_tokens',
-                       'layer_prefix': 'model.layers',
-                       'norm': 'model.norm',
-                       'lm_head': 'lm_head',}
+        # Added the rotary-embedding entry so the helper that eagerly moves
+        # buffers/devices can find it (optional but nice to have)
+        self.layer_names_dict = {
+            'embed':          'model.embed_tokens',
+            'layer_prefix':   'model.layers',
+            'norm':           'model.norm',
+            'lm_head':        'lm_head',
+            'rotary_pos_emb': 'model.rotary_emb',   # NEW
+        }
 
 
 
@@ -473,12 +478,32 @@ class AirLLMBaseModel(GenerationMixin):
                     for j in range(len(hidden_states)):
                         batch_input = hidden_states[j]
                         batch_past_key_value = past_key_values[i-1][j*minibatch:(j+1)*minibatch] if past_key_values is not None else None
+
+                        # ------------------------------------------------------
+                        # NEW: build kwargs dict and inject (cos, sin) tuple for
+                        # Qwen-3 layers – other architectures stay untouched.
+                        # ------------------------------------------------------
+                        layer_kwargs = {
+                            "position_ids":    position_ids,
+                            "past_key_value":  batch_past_key_value,
+                            "use_cache":       use_cache,
+                            "output_attentions": output_attentions,
+                        }
+
+                        if hasattr(self.model, "model") and hasattr(self.model.model, "rotary_emb"):
+                            seq_len_j = batch_input.shape[1]
+                            pos_emb = self.model.model.rotary_emb(
+                                batch_input,
+                                position_ids[:, :seq_len_j],
+                            )
+                            layer_kwargs["position_embeddings"] = pos_emb
+
+                        # ------------------------------------------------------
+                        # call the decoder layer with the right arguments
+                        # ------------------------------------------------------
                         layer_outputs = layer(
                             batch_input,
-                            position_ids=position_ids,
-                            past_key_value=batch_past_key_value,
-                            use_cache=use_cache,
-                            output_attentions=output_attentions
+                            **layer_kwargs,
                         )
 
                         new_hidden_states.append(layer_outputs[0])
