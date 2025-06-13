@@ -366,37 +366,34 @@ class AirLLMBaseModel(GenerationMixin):
 
 
     def run_lm_head(self, layer, seq, num_samples=32):
-        batch_size, seq_len, hidden_dim = seq.shape
+        """
+        Memory-aware: keep the outer batch loop but remove the inner
+        sequence loop using scatter_add on GPU.
+        """
+        batch_size, seq_len, _ = seq.shape
         results = []
-        
-        for i in range(batch_size):
-            logits_i = layer(seq[i]).float()                     # [seq_len, vocab]
-            probs_i  = torch.softmax(logits_i, dim=-1)
-            probs_i  = torch.nan_to_num(probs_i,
-                                        nan=0.0, posinf=0.0, neginf=0.0)
 
-            # one multinomial call covers the *whole* sequence
-            samples  = torch.multinomial(
-                probs_i, num_samples, replacement=True
-            )                                                    # [seq_len, num_samples]
+        for i in range(batch_size):                              # per-example processing
+            logits = layer(seq[i]).float()                       # [S, V]
+            probs  = torch.softmax(logits, dim=-1)
+            probs  = torch.nan_to_num(probs,
+                                      nan=0.0, posinf=0.0, neginf=0.0)
 
-            # gather counts per position
-            ids_out     = torch.full_like(samples, -1)
-            counts_out  = torch.zeros_like(samples)
-            for t in range(samples.size(0)):                     # tiny inner loop, seq_len
-                uniq_ids, uniq_counts = torch.unique(
-                    samples[t], return_counts=True
-                )
-                k = min(num_samples, uniq_ids.size(0))
-                ids_out[ t, :k ]    = uniq_ids[   :k ]
-                counts_out[t, :k ]  = uniq_counts[:k ]
+            samples = torch.multinomial(probs,
+                                        num_samples,
+                                        replacement=True)        # [S, K]
 
-            pos_results = torch.stack(
-                [ids_out.float(), counts_out.float()], dim=1
-            )                                                    # [seq_len, 2, num_samples]
-            results.append(pos_results)
-        
-        return torch.stack(results)  # Shape: [batch_size, seq_len, 2, top_k]
+            counts = torch.zeros(seq_len, probs.size(-1),
+                                 device=samples.device,
+                                 dtype=torch.int32)
+            counts.scatter_add_(1, samples,
+                                torch.ones_like(samples,
+                                                dtype=counts.dtype))
+
+            counts_topk, ids_topk = counts.float().topk(num_samples, dim=1)
+            results.append(torch.stack([ids_topk, counts_topk], dim=1))  # [S, 2, K]
+
+        return torch.stack(results)                              # [B, S, 2, K]
 
     def run_norm(self, layer, seq):
         return layer(seq)
