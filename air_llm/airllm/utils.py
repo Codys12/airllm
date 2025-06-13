@@ -267,7 +267,7 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None, splitt
 
         # Optionnally load next shard
         shards = [int(v.split('-')[1]) for k, v in index.items() if k.startswith(layer)]
-        if max(shards) > shard:
+        if shards and max(shards) > shard:
             # optinoally delete original file
             if delete_original and shard != 0:
                 if not safetensors_format:
