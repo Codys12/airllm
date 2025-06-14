@@ -296,11 +296,14 @@ class AirLLMBaseModel(GenerationMixin):
             tensor = state_dict[param_name]
 
             # --- NEW: skip 1‑D weights (LayerNorm / RMSNorm) ---
-            if tensor.ndim < 2:               # 1‑D weights are never quantised
+            if tensor.ndim < 2:  # 1-D weights (RMS/LayerNorm, embeddings, …)
+                # ➊ move to the active GPU
                 set_module_tensor_to_device(
                     self.model, param_name, self.running_device,
                     value=tensor, dtype=self.running_dtype
                 )
+                # ➋ **remember** the name so we can off-load it later
+                layers.append(param_name)
                 continue
             if (self.hf_quantizer is None or
                 not self.hf_quantizer.check_quantized_param(self.model, param_value=tensor, param_name=param_name, state_dict={})
