@@ -224,8 +224,6 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None, splitt
     else:
         layers = [layer_names['embed']] + [f'{layer_names["layer_prefix"]}.{i}' for i in range(n_layers)] + [layer_names['norm'], layer_names['lm_head']]
 
-        if 'rotary_pos_emb' in layer_names:
-            layers = [layer_names['rotary_pos_emb']] + layers
         layers = [l + "." for l in layers]
 
 
