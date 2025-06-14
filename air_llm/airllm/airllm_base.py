@@ -295,18 +295,6 @@ class AirLLMBaseModel(GenerationMixin):
         for param_name in layers:
             tensor = state_dict[param_name]
 
-            # --- NEW: skip 1‑D weights (LayerNorm / RMSNorm) ---
-            if tensor.ndim < 2:  # 1-D weights (RMS/LayerNorm, embeddings, …)
-            # ☛ Work‑around accelerate bug: do **not** supply `dtype` for 1‑D tensors.
-            #    We cast ourselves and pass dtype=None so the helper actually
-            #    materialises the buffer on the real device instead of leaving
-            #    it on `meta`.
-                materialised = tensor.to(dtype=self.running_dtype)
-                set_module_tensor_to_device(
-                    self.model, param_name, self.running_device,
-                    value=materialised, dtype=None
-                )
-                continue
             if (self.hf_quantizer is None or
                 not self.hf_quantizer.check_quantized_param(self.model, param_value=tensor, param_name=param_name, state_dict={})
                ):
