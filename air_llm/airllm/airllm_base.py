@@ -301,17 +301,17 @@ class AirLLMBaseModel(GenerationMixin):
             #    We cast ourselves and pass dtype=None so the helper actually
             #    materialises the buffer on the real device instead of leaving
             #    it on `meta`.
-            materialised = tensor.to(self.running_device, dtype=self.running_dtype)
-            set_module_tensor_to_device(
-                self.model, param_name, self.running_device,
-                value=materialised, dtype=None
-            )
-            continue
+                materialised = tensor.to(self.running_device)
+                set_module_tensor_to_device(
+                    self.model, param_name, self.running_device,
+                    value=materialised, dtype=None
+                )
+                continue
             if (self.hf_quantizer is None or
                 not self.hf_quantizer.check_quantized_param(self.model, param_value=tensor, param_name=param_name, state_dict={})
                ):
                 set_module_tensor_to_device(self.model, param_name, self.running_device, value=tensor,
-                                            dtype=self.running_dtype,
+                                            dtype=None,
                                             )
             else:
                 torch_dtype = self.hf_quantizer.update_torch_dtype(None)
