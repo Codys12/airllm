@@ -472,6 +472,8 @@ class AirLLMBaseModel(GenerationMixin):
                 else:
                     state_dict = self.load_layer_to_cpu(layer_name)
                     moved_layers = self.move_layer_to_device(state_dict)
+                    with torch.no_grad():         # never needs gradients
+                        layer.to(self.running_device)
 
                 if layer_name == self.layer_names_dict['embed']:
                     batch_hidden_states = [input_ids[j:j+minibatch] for j in range(0, batch_size, minibatch)]
