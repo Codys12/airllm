@@ -301,7 +301,7 @@ class AirLLMBaseModel(GenerationMixin):
             #    We cast ourselves and pass dtype=None so the helper actually
             #    materialises the buffer on the real device instead of leaving
             #    it on `meta`.
-                materialised = tensor.to(self.running_device)
+                materialised = tensor.to(dtype=self.running_dtype)
                 set_module_tensor_to_device(
                     self.model, param_name, self.running_device,
                     value=materialised, dtype=None
