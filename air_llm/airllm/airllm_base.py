@@ -197,13 +197,31 @@ class AirLLMBaseModel(GenerationMixin):
 
         self.set_layers_from_layer_names()
 
-        # Move buffers to device
-        for buffer_name, buffer in self.model.named_buffers():
-            set_module_tensor_to_device(self.model, buffer_name, self.running_device, value=buffer,
-                                        dtype=self.running_dtype)
+        # ──────────────────────────────────────────────────────────────
+        # 1⃣  Materialise RoPE once so it never stays on `meta`
+        # ──────────────────────────────────────────────────────────────
+        self.model.model.rotary_emb.to(self.running_device)
 
-        if 'rotary_pos_emb' in self.layer_names_dict:
-            self.load_rotary_pos_emb_to_device()
+        # 2⃣  Move the *other* buffers
+        for name, buf in self.model.named_buffers():
+            if name != 'model.rotary_emb.inv_freq':      # already moved
+                set_module_tensor_to_device(self.model, name,
+                                            self.running_device,
+                                            value=buf,
+                                            dtype=self.running_dtype)
+
+        # 3⃣  Per-length cache for (cos, sin)
+        self._rotary_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+
+    # helper lives here so it has access to self._rotary_cache
+    def _rotary(self, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+        if seq_len not in self._rotary_cache:
+            dummy = torch.empty(1, seq_len, self.model.config.hidden_size,
+                                device=self.running_device,
+                                dtype=self.running_dtype)
+            pos   = torch.arange(seq_len, device=self.running_device).unsqueeze(0)
+            self._rotary_cache[seq_len] = self.model.model.rotary_emb(dummy, pos)
+        return self._rotary_cache[seq_len]
 
     def set_layers_from_layer_names(self):
 
@@ -509,13 +527,10 @@ class AirLLMBaseModel(GenerationMixin):
                             "output_attentions": output_attentions,
                         }
 
-                        if hasattr(self.model, "model") and hasattr(self.model.model, "rotary_emb"):
-                            seq_len_j = batch_input.shape[1]
-                            pos_emb = self.model.model.rotary_emb(
-                                batch_input,
-                                position_ids[:, :seq_len_j],
-                            )
-                            layer_kwargs["position_embeddings"] = pos_emb
+                        if hasattr(self.model, "model") \
+                           and hasattr(self.model.model, "rotary_emb"):
+                            layer_kwargs["position_embeddings"] = \
+                                self._rotary(batch_input.shape[1])
 
                         # ------------------------------------------------------
                         # call the decoder layer with the right arguments
