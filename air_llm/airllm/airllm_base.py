@@ -293,10 +293,19 @@ class AirLLMBaseModel(GenerationMixin):
                         layers.append(layer_name)
 
         for param_name in layers:
+            tensor = state_dict[param_name]
+
+            # --- NEW: skip 1‑D weights (LayerNorm / RMSNorm) ---
+            if tensor.ndim < 2:               # 1‑D weights are never quantised
+                set_module_tensor_to_device(
+                    self.model, param_name, self.running_device,
+                    value=tensor, dtype=self.running_dtype
+                )
+                continue
             if (self.hf_quantizer is None or
-                not self.hf_quantizer.check_quantized_param(self.model, param_value=None, param_name=param_name, state_dict={})
+                not self.hf_quantizer.check_quantized_param(self.model, param_value=tensor, param_name=param_name, state_dict={})
                ):
-                set_module_tensor_to_device(self.model, param_name, self.running_device, value=state_dict[param_name],
+                set_module_tensor_to_device(self.model, param_name, self.running_device, value=tensor,
                                             dtype=self.running_dtype,
                                             )
             else:
