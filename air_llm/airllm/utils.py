@@ -185,6 +185,7 @@ def remove_real_and_linked_file(to_delete):
 
 
 
+
 def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None, splitted_model_dir_name='splitted_model',
                           compression=None, layer_names=None, delete_original=False, repo_id=None, hf_token=None):
     """
@@ -263,46 +264,48 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None, splitt
 
     for layer in tqdm(layers):
 
-        # Optionnally load next shard
-        shards = [int(v.split('-')[1]) for k, v in index.items() if k.startswith(layer)]
-        if shards and max(shards) > shard:
-            # optinoally delete original file
-            if delete_original and shard != 0:
+        # ────────────────────────────────────────────────────────────────
+        # NEW LOGIC ► load **all** shards that contain tensors for layer
+        # ────────────────────────────────────────────────────────────────
+        layer_shards = sorted({int(v.split('-')[1]) for k, v in index.items() if k.startswith(layer)})
+
+        for target_shard in layer_shards:
+            if target_shard > shard:
+                # optionally delete the previous shard file if desired
+                if delete_original and shard != 0:
+                    if not safetensors_format:
+                        to_delete = checkpoint_path / f'pytorch_model-{shard:05d}-of-{n_shards:05d}.bin'
+                    else:
+                        to_delete = checkpoint_path / f'model-{shard:05d}-of-{n_shards:05d}.safetensors'
+
+                    print(f"deleting original file: {to_delete}")
+                    remove_real_and_linked_file(to_delete)
+
+                shard = target_shard
+                print(f'Loading shard {shard}/{n_shards}')
+
                 if not safetensors_format:
-                    to_delete = checkpoint_path / f'pytorch_model-{shard:05d}-of-{n_shards:05d}.bin'
+                    to_load = checkpoint_path / f'pytorch_model-{shard:05d}-of-{n_shards:05d}.bin'
                 else:
-                    to_delete = checkpoint_path / f'model-{shard:05d}-of-{n_shards:05d}.safetensors'
+                    to_load = checkpoint_path / f'model-{shard:05d}-of-{n_shards:05d}.safetensors'
 
-                print(f"deleting original file: {to_delete}")
-                remove_real_and_linked_file(to_delete)
-            shard += 1
-            print(f'Loading shard {shard}/{n_shards}')
+                # download shard lazily if missing
+                if not os.path.exists(to_load):
+                    assert repo_id is not None
+                    huggingface_hub.snapshot_download(repo_id, allow_patterns=os.path.basename(to_load), token=hf_token)
 
-            if not safetensors_format:
-                to_load = checkpoint_path / f'pytorch_model-{shard:05d}-of-{n_shards:05d}.bin'
-            else:
-                to_load = checkpoint_path / f'model-{shard:05d}-of-{n_shards:05d}.safetensors'
-
-            # check if to_load exist, if not downloaad it...
-            if not os.path.exists(to_load):
-                assert repo_id is not None
-                huggingface_hub.snapshot_download(repo_id, allow_patterns=os.path.basename(to_load),
-                                                  token=hf_token)
-
-            if not safetensors_format:
-                state_dict.update(torch.load(to_load, map_location='cpu'))
-            else:
-                state_dict.update(load_file(to_load, device='cpu'))
-
+                if not safetensors_format:
+                    state_dict.update(torch.load(to_load, map_location='cpu'))
+                else:
+                    state_dict.update(load_file(to_load, device='cpu'))
 
         # Get layer state dict
-        layer_state_dict = dict([(k, v) for k, v in state_dict.items() if k.startswith(layer)])
+        layer_state_dict = {k: v for k, v in state_dict.items() if k.startswith(layer)}
 
         layer_state_dict = compress_layer_state_dict(layer_state_dict, compression)
 
 
-        # Save layer state dict as using safetensors
-
+        # Save layer state dict using safetensors
         marker_exists = ModelPersister.get_model_persister().model_persist_exist(layer, saving_path)
         if not marker_exists:
             ModelPersister.get_model_persister().persist_model(layer_state_dict, layer, saving_path)
@@ -357,24 +360,6 @@ def find_or_create_local_splitted_path(model_local_path_or_repo_id, layer_shards
         #allow_patterns= ["model.safetensors.index.json", 'pytorch_model.bin.index.json'],
         ignore_patterns=['*.safetensors', '*.bin'])
 
-
-    # check if there's safetensors saved, if so, exclude torch saves
-    # delay download now...
-    '''
-    hf_cache_path = huggingface_hub.snapshot_download(model_local_path_or_repo_id, token=hf_token, allow_patterns="model.safetensors.index.json")
-    if len(glob(str(Path(hf_cache_path) / "model.safetensors.index.json"))) > 0:
-        # there's safe tensor version, exclude torch version
-        hf_cache_path = huggingface_hub.snapshot_download(model_local_path_or_repo_id, token=hf_token,
-                                                          ignore_patterns=['pytorch_model.bin.index.json', '*.bin'])
-
-    else:
-        hf_cache_path = huggingface_hub.snapshot_download(model_local_path_or_repo_id,
-                                                          token=hf_token)
-    '''
-
-    #assert os.path.exists(Path(hf_cache_path) / 'pytorch_model.bin.index.json') or \
-    #       os.path.exists(Path(hf_cache_path) / 'model.safetensors.index.json'), \
-    #       f"{hf_cache_path}/pytorch_model.bin.index.json or {hf_cache_path}/model.safetensors.index.json should exists."
 
     # if splitted_model subdir exists under cache use it, otherwise split and save
     return Path(hf_cache_path), split_and_save_layers(hf_cache_path, layer_shards_saving_path,
