@@ -294,6 +294,8 @@ class AirLLMBaseModel(GenerationMixin):
 
         for param_name in layers:
             tensor = state_dict[param_name]
+            print(f"[DBG]    ↪ {param_name:<60} "
+                  f"shape={tuple(tensor.shape)} dtype={tensor.dtype}")
 
             if (self.hf_quantizer is None or
                 not self.hf_quantizer.check_quantized_param(self.model, param_value=tensor, param_name=param_name, state_dict={})
@@ -465,15 +467,25 @@ class AirLLMBaseModel(GenerationMixin):
                                             desc=f'running layers({self.running_device})',
                                             total=len(self.layers)):
                 if self.prefetching:
-                    state_dict = future.result()
+                    state_dict   = future.result()
                     moved_layers = self.move_layer_to_device(state_dict)
+                    print(f"[DBG] moved {len(moved_layers)} tensors → {self.running_device} "
+                          f"for {layer_name}")
                     if (i + 1) < len(self.layer_names):
                         future = executor.submit(self.load_layer_to_cpu, self.layer_names[i+1])
                 else:
                     state_dict = self.load_layer_to_cpu(layer_name)
                     moved_layers = self.move_layer_to_device(state_dict)
-                    with torch.no_grad():         # never needs gradients
-                        layer.to(self.running_device)
+                    with torch.no_grad():
+                        print(f"[DBG] .to({self.running_device}) ► {layer_name}")
+                        try:
+                            layer.to(self.running_device)
+                        except NotImplementedError as e:
+                            print(f"[ERR] copy failed for {layer_name}: {e}")
+                            for n, p in layer.named_parameters():
+                                print(f"[DUMP] {n} • dev={p.device} • meta={p.is_meta} "
+                                      f"• shape={tuple(p.shape)}")
+                            raise
 
                 if layer_name == self.layer_names_dict['embed']:
                     batch_hidden_states = [input_ids[j:j+minibatch] for j in range(0, batch_size, minibatch)]
