@@ -294,8 +294,6 @@ class AirLLMBaseModel(GenerationMixin):
 
         for param_name in layers:
             tensor = state_dict[param_name]
-            print(f"[DBG]    ↪ {param_name:<60} "
-                  f"shape={tuple(tensor.shape)} dtype={tensor.dtype}")
 
             if (self.hf_quantizer is None or
                 not self.hf_quantizer.check_quantized_param(self.model, param_value=tensor, param_name=param_name, state_dict={})
@@ -469,15 +467,12 @@ class AirLLMBaseModel(GenerationMixin):
                 if self.prefetching:
                     state_dict   = future.result()
                     moved_layers = self.move_layer_to_device(state_dict)
-                    print(f"[DBG] moved {len(moved_layers)} tensors → {self.running_device} "
-                          f"for {layer_name}")
                     if (i + 1) < len(self.layer_names):
                         future = executor.submit(self.load_layer_to_cpu, self.layer_names[i+1])
                 else:
                     state_dict = self.load_layer_to_cpu(layer_name)
                     moved_layers = self.move_layer_to_device(state_dict)
                     with torch.no_grad():
-                        print(f"[DBG] .to({self.running_device}) ► {layer_name}")
                         try:
                             layer.to(self.running_device)
                         except NotImplementedError as e:
