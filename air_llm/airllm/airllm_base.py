@@ -19,7 +19,7 @@ from .utils import clean_memory, load_layer, \
     find_or_create_local_splitted_path
 
 try:
-    import bitsandbytes as bnb
+    import bitsandbytes as bnbf
 
     bitsandbytes_installed = True
     print('>>>> bitsandbytes installed')
@@ -489,15 +489,6 @@ class AirLLMBaseModel(GenerationMixin):
                 else:
                     state_dict = self.load_layer_to_cpu(layer_name)
                     moved_layers = self.move_layer_to_device(state_dict)
-                    with torch.no_grad():
-                        try:
-                            layer.to(self.running_device)
-                        except NotImplementedError as e:
-                            print(f"[ERR] copy failed for {layer_name}: {e}")
-                            for n, p in layer.named_parameters():
-                                print(f"[DUMP] {n} • dev={p.device} • meta={p.is_meta} "
-                                      f"• shape={tuple(p.shape)}")
-                            raise
 
                 if layer_name == self.layer_names_dict['embed']:
                     batch_hidden_states = [input_ids[j:j+minibatch] for j in range(0, batch_size, minibatch)]
