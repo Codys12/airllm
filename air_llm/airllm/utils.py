@@ -252,7 +252,7 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None, splitt
 
 
 
-    shard = 0
+    shard = -1
     n_shards = len(set(index.values()))
     state_dict = {}
 
