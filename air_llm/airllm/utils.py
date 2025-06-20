@@ -270,7 +270,7 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None, splitt
         layer_shards = sorted({int(v.split('-')[1]) for k, v in index.items() if k.startswith(layer)})
 
         for target_shard in layer_shards:
-            if target_shard > shard:
+            if target_shard != shard:
                 # optionally delete the previous shard file if desired
                 if delete_original and shard != 0:
                     if not safetensors_format:
