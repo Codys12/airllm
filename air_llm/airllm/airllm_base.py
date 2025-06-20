@@ -559,6 +559,16 @@ class AirLLMBaseModel(GenerationMixin):
                            and hasattr(self.model.model, "rotary_emb"):
                             layer_kwargs["position_embeddings"] = \
                                 self._rotary(batch_input.shape[1])
+                               
+                        # ── Optional MiniMax-style slope_rate ────────────────────────
+                        # Forward the per-layer decay tensor if the model provides it
+                        if hasattr(self.model, "model") and hasattr(self.model.model, "slopes"):
+                            total_decoder_layers = len(self.layer_names) - 3   # embed + norm + lm_head excluded
+                            decoder_idx = i - 1                                # first decoder layer = 0
+                            slope_rate = self.model.model.slopes.to(self.running_device)
+                            # same scheduling used in MiniMaxM1Model.forward
+                            slope_rate = slope_rate * (1 - decoder_idx / max(total_decoder_layers - 1, 1) + 1e-5)
+                            layer_kwargs["slope_rate"] = slope_rate
 
                         # ------------------------------------------------------
                         # call the decoder layer with the right arguments
