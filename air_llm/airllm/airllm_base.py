@@ -477,6 +477,13 @@ class AirLLMBaseModel(GenerationMixin):
         with torch.inference_mode(), ThreadPoolExecutor() as executor:
             if self.prefetching:
                 future = executor.submit(self.load_layer_to_cpu, self.layer_names[0])
+            def assert_no_meta(tensor_module, layer_name):
+                metas = [n for n, p in tensor_module.named_parameters() if p.is_meta]
+                if metas:
+                    print(f"[META] {layer_name}: {len(metas)} parameters are still meta:")
+                    for n in metas:
+                        print("   •", n)
+                    raise RuntimeError("layer has meta parameters")
 
             for i, (layer_name, layer) in tqdm(enumerate(zip(self.layer_names, self.layers)),
                                             desc=f'running layers({self.running_device})',
@@ -484,11 +491,13 @@ class AirLLMBaseModel(GenerationMixin):
                 if self.prefetching:
                     state_dict   = future.result()
                     moved_layers = self.move_layer_to_device(state_dict)
+                    assert_no_meta(layer, layer_name)
                     if (i + 1) < len(self.layer_names):
                         future = executor.submit(self.load_layer_to_cpu, self.layer_names[i+1])
                 else:
                     state_dict = self.load_layer_to_cpu(layer_name)
                     moved_layers = self.move_layer_to_device(state_dict)
+                    assert_no_meta(layer, layer_name)
 
                 if layer_name == self.layer_names_dict['embed']:
                     batch_hidden_states = [input_ids[j:j+minibatch] for j in range(0, batch_size, minibatch)]
