@@ -198,17 +198,34 @@ class AirLLMBaseModel(GenerationMixin):
         self.set_layers_from_layer_names()
 
         # ──────────────────────────────────────────────────────────────
-        # 1⃣  Materialise RoPE once so it never stays on `meta`
+        # Handle rotary embeddings *only* if the model provides them
         # ──────────────────────────────────────────────────────────────
-        self.model.model.rotary_emb.to(self.running_device)
+        self._rotary_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
 
-        # 2⃣  Move the *other* buffers
+        if hasattr(self.model, "model") and hasattr(self.model.model, "rotary_emb"):
+            # 1⃣  Materialise RoPE once so it never stays on `meta`
+            self.model.model.rotary_emb.to(self.running_device)
+            has_rope = True
+        else:
+            has_rope = False
+
+            # Provide a no-op stub so the rest of the code can still call `self._rotary`
+            def _rotary_noop(seq_len: int):
+                return None
+
+            self._rotary = _rotary_noop.__get__(self, AirLLMBaseModel)  # bind to instance
+
+        # 2⃣  Move the *other* buffers (skip RoPE inv_freq if it was already moved)
         for name, buf in self.model.named_buffers():
-            if name != 'model.rotary_emb.inv_freq':      # already moved
-                set_module_tensor_to_device(self.model, name,
-                                            self.running_device,
-                                            value=buf,
-                                            dtype=self.running_dtype)
+            if has_rope and name == "model.rotary_emb.inv_freq":
+                continue  # already handled above
+            set_module_tensor_to_device(
+                self.model,
+                name,
+                self.running_device,
+                value=buf,
+                dtype=self.running_dtype,
+            )
 
         # 3⃣  Per-length cache for (cos, sin)
         self._rotary_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
