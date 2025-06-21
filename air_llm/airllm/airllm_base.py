@@ -464,10 +464,10 @@ class AirLLMBaseModel(GenerationMixin):
 
         # Create attention mask and position ids if not provided
         if attention_mask is None:
-            attention_mask = torch.ones(self.max_seq_len, self.max_seq_len, device=self.running_device)
+            attention_mask = torch.ones(seq_len, seq_len, device=self.running_device)
             attention_mask = attention_mask.triu(diagonal=1)[None, None, ...] == 0
         if position_ids is None:
-            position_ids = torch.arange(self.max_seq_len, dtype=torch.long, device=self.running_device)[None, :]
+            position_ids = torch.arange(seq_len, dtype=torch.long, device=self.running_device)[None, :]
 
         hidden_states = None
         all_hidden_states = [] if output_hidden_states else None
@@ -548,8 +548,9 @@ class AirLLMBaseModel(GenerationMixin):
                         # NEW: build kwargs dict and inject (cos, sin) tuple for
                         # Qwen-3 layers – other architectures stay untouched.
                         # ------------------------------------------------------
+                        seq_sub_len = batch_input.shape[1]
                         layer_kwargs = {
-                            "position_ids":    position_ids,
+                            "position_ids":    position_ids[:, :seq_sub_len],
                             "past_key_value":  batch_past_key_value,
                             "use_cache":       use_cache,
                             "output_attentions": output_attentions,
