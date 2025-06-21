@@ -114,7 +114,7 @@ def uncompress_layer_state_dict(layer_state_dict):
 
 def load_layer(local_path, layer_name, profiling=False):
     #layer_state_dict = load_file(Path(local_path) / (layer_name + ".safetensors"), device="cpu")
-    layer_state_dict = ModelPersister.get_model_persister().load_model(layer_name, local_path)
+    layer_state_dict = ModelPersister.get_model_persister().load_model(layer_name, local_path, mmap=True)
 
     if profiling:
         t = time.process_time()
