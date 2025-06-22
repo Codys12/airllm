@@ -406,8 +406,8 @@ class AirLLMBaseModel(GenerationMixin):
         self,
         layer,
         seq: torch.Tensor,
-        num_samples: int = 32,
-        chunk_tokens: int = 4096,
+        num_samples: int = 255,
+        chunk_tokens: int = 2048,
     ):
         """
         Chunk-wise multinomial sampling for the final lm_head.
