@@ -402,35 +402,79 @@ class AirLLMBaseModel(GenerationMixin):
         return {'position_ids': full_position_ids[:, len_p:len_p + len_s]}
 
 
-    def run_lm_head(self, layer, seq, num_samples=32):
+    def run_lm_head(
+        self,
+        layer,
+        seq: torch.Tensor,
+        num_samples: int = 32,
+        chunk_tokens: int = 4096,
+    ):
         """
-        Memory-aware: keep the outer batch loop but remove the inner
-        sequence loop using scatter_add on GPU.
+        Chunk-wise multinomial sampling for the final lm_head.
+
+        Parameters
+        ----------
+        layer : nn.Module
+            The model's lm_head (projection to vocab).
+        seq : torch.FloatTensor
+            Hidden states shaped (B, S, H).
+        num_samples : int, optional
+            How many tokens to sample per position, by default 32.
+        chunk_tokens : int, optional
+            Maximum tokens per chunk along the sequence dimension.
+            Tune this to fit the available GPU RAM. 4096 is a safe
+            default for 80 GB GPUs with ~100 k-token vocab in fp32.
+
+        Returns
+        -------
+        torch.IntTensor
+            Tensor shaped (B, S, 2, K) where the 2 rows are
+            • ids_topk   – the sampled token ids
+            • counts_topk – their counts (frequency) across `num_samples`.
         """
         batch_size, seq_len, _ = seq.shape
         results = []
 
-        for i in range(batch_size):                              # per-example processing
-            logits = layer(seq[i]).float()                       # [S, V]
-            probs  = torch.softmax(logits, dim=-1)
-            probs  = torch.nan_to_num(probs,
-                                      nan=0.0, posinf=0.0, neginf=0.0)
+        for i in range(batch_size):                       # per-example
+            token_results = []
 
-            samples = torch.multinomial(probs,
-                                        num_samples,
-                                        replacement=True)        # [S, K]
+            for start in range(0, seq_len, chunk_tokens):
+                end = min(start + chunk_tokens, seq_len)
 
-            counts = torch.zeros(seq_len, probs.size(-1),
-                                 device=samples.device,
-                                 dtype=torch.int32)
-            counts.scatter_add_(1, samples,
-                                torch.ones_like(samples,
-                                                dtype=counts.dtype))
+                logits = layer(seq[i, start:end]).float()  # [T, V]
+                probs  = torch.softmax(logits, dim=-1)
+                probs  = torch.nan_to_num(
+                    probs, nan=0.0, posinf=0.0, neginf=0.0
+                )
 
-            counts_topk, ids_topk = counts.float().topk(num_samples, dim=1)
-            results.append(torch.stack([ids_topk, counts_topk], dim=1))  # [S, 2, K]
+                samples = torch.multinomial(
+                    probs, num_samples, replacement=True   # [T, K]
+                )
 
-        return torch.stack(results)                              # [B, S, 2, K]
+                counts = torch.zeros(
+                    end - start, probs.size(-1),
+                    device=samples.device, dtype=torch.int32
+                )
+                counts.scatter_add_(
+                    1, samples,
+                    torch.ones_like(samples, dtype=counts.dtype)
+                )
+
+                counts_topk, ids_topk = counts.float().topk(
+                    num_samples, dim=1
+                )
+                token_results.append(
+                    torch.stack([ids_topk, counts_topk], dim=1)
+                )
+
+                # free per-chunk tensors
+                del logits, probs, samples, counts
+                torch.cuda.empty_cache()
+
+            # concatenate all chunks for this example → [S, 2, K]
+            results.append(torch.cat(token_results, dim=0))
+
+        return torch.stack(results)                       # [B, S, 2, K]
 
     def run_norm(self, layer, seq):
         return layer(seq)
