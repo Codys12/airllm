@@ -16,7 +16,7 @@ setuptools.setup(
     install_requires=[
         'tqdm',
         'torch',
-        'transformers==4.43.1',
+        'transformers',
         'accelerate',
         'safetensors',
         'optimum',
