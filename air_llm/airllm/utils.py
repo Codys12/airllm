@@ -175,16 +175,37 @@ def compress_layer_state_dict(layer_state_dict, compression=None):
 
     return compressed_layer_state_dict if compressed_layer_state_dict is not None else layer_state_dict
 
-def remove_real_and_linked_file(to_delete):
-    if (os.path.realpath(to_delete) != to_delete):
-        targetpath = os.path.realpath(to_delete)
 
-    os.remove(to_delete)
-    if (targetpath):
-         os.remove(targetpath)
+def remove_real_and_linked_file(to_delete: str) -> None:
+    """
+    Delete the given file. If it is a symlink, also delete the real target.
+    Any errors are caught and logged instead of propagating.
+    """
+    targetpath = None
 
+    try:
+        # If the path is a symlink, remember its real destination
+        if os.path.realpath(to_delete) != to_delete:
+            targetpath = os.path.realpath(to_delete)
 
+        # Remove the symlink or regular file
+        os.remove(to_delete)
 
+        # If we resolved a separate target, try to remove it too
+        if targetpath:
+            try:
+                os.remove(targetpath)
+            except FileNotFoundError:
+                # Target already gone; nothing to worry about
+                logging.debug("Target file %s was already absent", targetpath)
+
+    except FileNotFoundError as e:
+        logging.warning("File not found: %s", e.filename)
+    except PermissionError as e:
+        logging.error("Permission denied while deleting %s", e.filename)
+    except OSError as e:
+        # Catch-all for other OS-level issues, like I/O errors
+        logging.exception("Unexpected error while deleting files: %s", e)
 
 def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None, splitted_model_dir_name='splitted_model',
                           compression=None, layer_names=None, delete_original=False, repo_id=None, hf_token=None):
