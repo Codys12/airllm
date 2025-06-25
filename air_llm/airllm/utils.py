@@ -293,11 +293,11 @@ def split_and_save_layers(checkpoint_path, layer_shards_saving_path=None, splitt
         for target_shard in layer_shards:
             if target_shard != shard:
                 # optionally delete the previous shard file if desired
-                if delete_original and shard != 0:
+                if delete_original and shard != -1:
                     if not safetensors_format:
-                        to_delete = checkpoint_path / f'model-{target_shard:05d}-of-{n_shards:05d}.bin'
+                        to_delete = checkpoint_path / f'model-{shard:05d}-of-{n_shards:05d}.bin'
                     else:
-                        to_delete = checkpoint_path / f'model-{target_shard:05d}-of-{n_shards:05d}.safetensors'
+                        to_delete = checkpoint_path / f'model-{shard:05d}-of-{n_shards:05d}.safetensors'
 
                     print(f"deleting original file: {to_delete}")
                     remove_real_and_linked_file(to_delete)
