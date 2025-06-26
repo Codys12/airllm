@@ -1,6 +1,6 @@
-import os
+import os, io, requests
 from pathlib import Path
-from typing import Union, Dict
+from typing import Union, Dict, Tuple
 
 from .model_persister import ModelPersister
 from safetensors.torch import load_file, save_file
@@ -18,6 +18,14 @@ class SafetensorModelPersister(ModelPersister):
     * If the installed safetensors supports `mmap=…`, we use it.
     * Otherwise we fall back to `safe_open()` which never copies the bytes,
       so multiple processes still share the page-cache.
+
+    New in June 2025
+    ----------------
+    Recognises streaming URIs of the form
+        ``hf://<repo_id>/splitted_model[.<compression>]``
+    and downloads individual shards straight from the Hugging Face Hub
+    into memory, bypassing disk entirely.  Any failure automatically
+    falls back to the original on-disk code-path.
     """
 
     # ------------------------------------------------------------------ #
@@ -34,6 +42,35 @@ class SafetensorModelPersister(ModelPersister):
 
     def _done_path(self, layer_name: str, base: Path) -> Path:
         return base / f"{self._filename(layer_name)}.done"
+
+    # ------------------------------------------------------------------ #
+    # remote-stream helpers                                              #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _parse_hf_stream_path(hf_path: str) -> Tuple[str, str]:
+        """
+        Split ``hf://<repo_id>/<dir>`` into ``(<repo_id>, <dir>)``.
+        """
+        assert hf_path.startswith("hf://"), "not an hf-stream path"
+        stripped   = hf_path[5:]
+        split_key  = "/splitted_model"
+        split_at   = stripped.index(split_key)          # raises if malformed
+        repo_id    = stripped[:split_at]
+        dir_name   = stripped[split_at + 1:]            # keep folder name
+        return repo_id, dir_name
+
+    def _load_from_bytes(self, data: bytes) -> Dict[str, "torch.Tensor"]:
+        """
+        Zero-copy loader identical to `_load_with_safe_open` but operates on an
+        in-memory buffer instead of a file.
+        """
+        safe_open = import_module("safetensors.torch").safe_open
+        tensors: Dict[str, "torch.Tensor"] = {}
+        with safe_open(data, framework="pt", device="cpu") as f:
+            for k in f.keys():
+                tensors[k] = f.get_tensor(k)
+        return tensors
 
     # ------------------------------------------------------------------ #
     # public API                                                         #
@@ -80,18 +117,43 @@ class SafetensorModelPersister(ModelPersister):
         **load_kwargs,
     ):
         """
-        Load a safetensor shard onto CPU, honouring `mmap` whenever possible.
-        Falls back transparently if the installed safetensors lacks the flag.
+        Load a safetensor shard onto CPU.
+
+        • If `path` begins with ``hf://`` the shard is streamed directly from
+          the Hub into RAM ― never written to disk.
+
+        • Otherwise we honour `mmap` when possible and fall back to
+          `safe_open()` when the installed safetensors lacks that flag.
         """
+        # ── Remote streaming path ───────────────────────────────────────
+        if str(path).startswith("hf://"):
+            from huggingface_hub import hf_hub_url
+
+            repo_id, dir_name = self._parse_hf_stream_path(str(path))
+            url = hf_hub_url(
+                repo_id,
+                f"{dir_name}/{self._filename(layer_name)}",
+                token=os.environ.get("HF_TOKEN"),
+            )
+
+            try:
+                with requests.get(url, stream=True, timeout=30) as r:
+                    r.raise_for_status()
+                    data = r.content
+                return self._load_from_bytes(data)
+            except Exception as ex:
+                # Gracefully degrade to the disk-cache loader
+                print(f"[SafetensorModelPersister] stream-load failed: {ex}")
+
+        # ── Local filesystem path (original behaviour) ──────────────────
         file_path = self._tensor_path(layer_name, Path(path))
 
         if not mmap:
-            # caller doesn't care about mmap – use the regular helper
             return load_file(file_path, device="cpu", **load_kwargs)
 
-        # Try the fast path: load_file(..., mmap=True)
+        # Fast path: load_file(..., mmap=True)
         try:
             return load_file(file_path, device="cpu", mmap=True, **load_kwargs)
         except TypeError:
-            # Old safetensors – silently switch to safe_open()
+            # Older safetensors: silently switch to safe_open()
             return self._load_with_safe_open(file_path)
