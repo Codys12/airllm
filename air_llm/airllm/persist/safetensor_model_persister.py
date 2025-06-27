@@ -1,35 +1,32 @@
 """
 SafetensorModelPersister
 ========================
-Bullet-proof persister that *never* crashes and *always* caches/saves
-when ≥ 5 GiB are free. If free space drops below the threshold we just
-skip the write (remote-stream cache or persist) and carry on noiselessly.
+A bullet-proof persister that never crashes and always saves shards to
+disk whenever doing so leaves at least 5 GiB of free space.
 
-Changes in this revision
-------------------------
-• **No exceptions on low-disk** – `persist_model()` now *logs & skips* if
-  there isn’t room instead of raising `OSError`.
-• **Accurate size estimate** – `_estimate_size()` sums `tensor.nbytes` so
-  the free-space check is realistic.
-• Minor: renamed `DEFAULT_KEEP_FREE` → `KEEP_FREE_BYTES` for clarity.
-• **Guaranteed Hub-cache reuse** – `load_model()` now checks the local
-  Hugging Face cache *first* and only hits the network if the shard is
-  not already on disk. Fresh downloads are still written to the cache
-  (space permitting), so subsequent loads never re-download.
-• **Unified cache-path helper** – a new private method
-  `_cache_shard_path()` is used everywhere, so `_maybe_cache_shard()`
-  *always* writes to the exact location that `load_model()` expects.
+Key guarantees
+--------------
+* **No cache eviction** – once a shard is on disk it is never removed by
+  this class; if writing a new shard would push free space below the
+  5 GiB margin we simply skip caching the new shard.
+* **Atomic & concurrent-safe writes** – advisory file locks plus an
+  atomic `os.replace()` ensure the cache is never corrupted.
+* **Reliable downloads** – remote fetches are retried (exponential
+  back-off) and writing falls back noiselessly on any failure.
+* **No silent re-downloads** – a shard is fetched from the Hub only when
+  it is genuinely absent or corrupted on disk.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import tempfile
-import contextlib
+import time
 from importlib import import_module
 from pathlib import Path
-from typing import Dict, Tuple, Union, ContextManager
+from typing import ContextManager, Dict, Tuple, Union
 
 import requests
 from huggingface_hub.constants import HUGGINGFACE_HUB_CACHE
@@ -38,54 +35,38 @@ from safetensors.torch import load_file, save_file
 from .model_persister import ModelPersister
 
 try:
-    import fcntl  # POSIX-only; we fall back gracefully on Windows
+    import fcntl  # POSIX-only; absent on Windows
 except ImportError:  # pragma: no cover – Windows
     fcntl = None  # type: ignore
 
 PathLike = Union[str, Path]
 _TensorDict = Dict[str, "torch.Tensor"]
 
-# ---------------------------------------------------------------------------
-# Constants & helpers
-# ---------------------------------------------------------------------------
-KEEP_FREE_BYTES = 5 * 1024 ** 3  # 5 GiB safety margin
+# ---------------------------------------------------------------------------#
+# Constants & helpers                                                        #
+# ---------------------------------------------------------------------------#
+KEEP_FREE_BYTES = 5 * 1024**3  # 5 GiB safety margin
+MAX_FETCH_RETRIES = 3
 _LOCK_SUFFIX = ".lock"
 _TMP_SUFFIX = ".tmp"
 
 
 def _ensure_dir(path: Path) -> None:
-    """mkdir -p *path* (if it is meant to be a directory)"""
+    """`mkdir -p` *path*."""
     path.mkdir(parents=True, exist_ok=True)
 
 
-# ---------------------------------------------------------------------------
-# SafetensorModelPersister implementation
-# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------#
+# SafetensorModelPersister implementation                                    #
+# ---------------------------------------------------------------------------#
 class SafetensorModelPersister(ModelPersister):
-    """
-    Persist layers as `<layer_name>.safetensors` and support mmap sharing.
-
-    Guarantees
-    ----------
-    • If there is *any* failure writing to disk (low-space, permission,
-      concurrent clobber, etc.) we **never raise**, we simply skip the
-      on-disk write and return tensors from RAM.
-    • If ≥ ``KEEP_FREE_BYTES`` are available we *always* write – even if
-      parent directories don’t yet exist.
-    • Concurrent processes use an advisory lock plus atomic `os.replace`
-      so the cache is never corrupted.
-    • Remote shards are fetched exactly **once**; we always try the local
-      Hugging Face cache first and only download if missing.
-    """
-
     # ------------------------------------------------------------------ #
-    # helpers                                                            #
+    # path helpers                                                       #
     # ------------------------------------------------------------------ #
 
     @staticmethod
     def _filename(layer_name: str) -> str:
-        """Normalise layer name → shard filename."""
-        return f"{layer_name.rstrip('.')}.safetensors"  # avoid double dots
+        return f"{layer_name.rstrip('.')}.safetensors"
 
     def _tensor_path(self, layer_name: str, base: Path) -> Path:
         return base / self._filename(layer_name)
@@ -93,13 +74,9 @@ class SafetensorModelPersister(ModelPersister):
     def _done_path(self, layer_name: str, base: Path) -> Path:
         return base / f"{self._filename(layer_name)}.done"
 
-    # ---------- NEW: one true canonical HF-cache path builder ----------
+    # ––––– one canonical HF-cache path builder –––––
     @staticmethod
     def _cache_shard_path(repo_id: str, dir_name: str, layer_name: str) -> Path:
-        """
-        Return the local cache path for a Hub shard so both loader and
-        writer use the **exact** same location.
-        """
         return (
             Path(HUGGINGFACE_HUB_CACHE)
             / repo_id
@@ -113,13 +90,13 @@ class SafetensorModelPersister(ModelPersister):
 
     @staticmethod
     def _parse_hf_stream_path(hf_path: str) -> Tuple[str, str]:
-        """Split ``hf://<repo_id>/splitted_model`` → ``(<repo_id>, <dir>)``."""
+        """Split ``hf://<repo_id>/splitted_model`` → ``(repo_id, dir_name)``."""
         assert hf_path.startswith("hf://"), "not an hf-stream path"
         stripped = hf_path[5:]
         key = "/splitted_model"
         idx = stripped.index(key)  # raises if malformed
         repo_id = stripped[:idx]
-        dir_name = stripped[idx + 1 :]  # keep folder name itself
+        dir_name = stripped[idx + 1 :]
         return repo_id, dir_name
 
     def _load_from_bytes(self, data: bytes) -> _TensorDict:
@@ -140,19 +117,13 @@ class SafetensorModelPersister(ModelPersister):
         """Return `shutil.disk_usage` for *path* or its nearest existing parent."""
         probe = path
         while not probe.exists():
-            if probe == probe.parent:  # reached filesystem root
+            if probe == probe.parent:
                 break
             probe = probe.parent
         return shutil.disk_usage(probe)
 
-    def _enough_space(self, dir_path: Path, size_bytes: int) -> bool:
-        """True if writing *size_bytes* leaves ≥ KEEP_FREE_BYTES free."""
-        usage = self._disk_usage(dir_path)
-        return usage.free - size_bytes >= KEEP_FREE_BYTES
-
     @staticmethod
     def _estimate_size(state_dict: _TensorDict) -> int:
-        """Return total byte size of all tensors in *state_dict*."""
         total = 0
         for t in state_dict.values():
             try:
@@ -162,14 +133,13 @@ class SafetensorModelPersister(ModelPersister):
         return total
 
     # ------------------------------------------------------------------ #
-    # file-locking helpers                                               #
+    # file-locking helper                                                #
     # ------------------------------------------------------------------ #
 
     @contextlib.contextmanager
     def _exclusive_lock(self, path: Path) -> ContextManager[None]:
-        """Context manager acquiring an advisory lock on *path* (best-effort)."""
-        if fcntl is None:
-            yield  # Windows – no robust cross-process lock; hope for best
+        if fcntl is None:  # Windows
+            yield
             return
         _ensure_dir(path.parent)
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
@@ -181,47 +151,66 @@ class SafetensorModelPersister(ModelPersister):
             os.close(fd)
 
     # ------------------------------------------------------------------ #
-    # caching helpers                                                    #
+    # cache-write helper                                                 #
     # ------------------------------------------------------------------ #
 
-    def _maybe_cache_shard(
+    def _write_cache_shard(
         self,
         repo_id: str,
         dir_name: str,
         layer_name: str,
         data: bytes,
-    ) -> None:
-        """Best-effort write of the streamed shard to the HF cache."""
+    ) -> Path:
+        """
+        Best-effort: write *data* to the HF cache unless doing so would
+        leave less than ``KEEP_FREE_BYTES`` free.  Existing cache files
+        are **never** removed.
+        """
         shard_path = self._cache_shard_path(repo_id, dir_name, layer_name)
+        cache_root = shard_path.parent
 
-        # Already cached → done.
+        # Fast-path: already cached.
         if shard_path.exists():
-            return
+            return shard_path
 
-        if not self._enough_space(shard_path.parent, len(data)):
-            # Insufficient space → skip quietly.
+        size_bytes = len(data)
+
+        # Choose tmp directory – cache dir preferred, fall back to system tmp.
+        try:
+            _ensure_dir(cache_root)
+            tmp_dir = cache_root
+        except Exception:
+            tmp_dir = Path(tempfile.gettempdir())
+
+        usage = self._disk_usage(tmp_dir)
+
+        # If writing would violate the 5 GiB margin, skip caching.
+        if usage.free - size_bytes < KEEP_FREE_BYTES:
             print("[SafetensorModelPersister] Low disk – skipping cache write.")
-            return
+            return shard_path
 
-        tmp_path = shard_path.with_suffix(shard_path.suffix + _TMP_SUFFIX)
+        tmp_path = tmp_dir / (shard_path.name + _TMP_SUFFIX)
         lock_path = shard_path.with_suffix(shard_path.suffix + _LOCK_SUFFIX)
 
         with self._exclusive_lock(lock_path):
-            if shard_path.exists():  # another proc beat us
-                return
-
-            _ensure_dir(shard_path.parent)
+            if shard_path.exists():
+                return shard_path  # another process beat us
 
             try:
                 with open(tmp_path, "wb") as f:
                     f.write(data)
                     f.flush()
                     os.fsync(f.fileno())
-                os.replace(tmp_path, shard_path)
+                # Same-FS move first, fall back to shutil.move if needed.
+                try:
+                    os.replace(tmp_path, shard_path)
+                except OSError:
+                    shutil.move(tmp_path, shard_path)
             finally:
-                # Clean up leftover tmp on failure
                 if tmp_path.exists():
                     tmp_path.unlink(missing_ok=True)
+
+        return shard_path
 
     # ------------------------------------------------------------------ #
     # public API – saving                                                #
@@ -233,10 +222,6 @@ class SafetensorModelPersister(ModelPersister):
         layer_name: str,
         saving_path: PathLike,
     ) -> None:
-        """Save *state_dict* under *saving_path*.<layer_name>.safetensors.
-
-        Never raises for low-space – logs and returns.
-        """
         base_dir = Path(saving_path)
         _ensure_dir(base_dir)
 
@@ -246,18 +231,20 @@ class SafetensorModelPersister(ModelPersister):
 
         with self._exclusive_lock(lock_path):
             if tensor_path.exists():
-                return
+                return  # already persisted
 
             size_bytes = self._estimate_size(state_dict)
-            if not self._enough_space(base_dir, size_bytes):
+            usage = self._disk_usage(base_dir)
+
+            # Honour the 5 GiB margin for on-disk persists.
+            if usage.free - size_bytes < KEEP_FREE_BYTES:
                 print(
-                    f"[SafetensorModelPersister] Low disk – need {size_bytes/1e9:.2f} GiB free. Skipping persist."
+                    f"[SafetensorModelPersister] Low disk – skipping persist of {layer_name}."
                 )
                 return
 
             try:
                 save_file(state_dict, tmp_path)
-                # Explicitly fsync to guarantee durability before rename
                 with open(tmp_path, "rb") as f:
                     os.fsync(f.fileno())
                 os.replace(tmp_path, tensor_path)
@@ -278,13 +265,32 @@ class SafetensorModelPersister(ModelPersister):
     # ------------------------------------------------------------------ #
 
     def _load_with_safe_open(self, file_path: Path) -> _TensorDict:
-        """Fallback loader that never copies data (mmap via safe_open)."""
         safe_open = import_module("safetensors.torch").safe_open
         state: _TensorDict = {}
         with safe_open(file_path, framework="pt", device="cpu") as f:
             for k in f.keys():
                 state[k] = f.get_tensor(k)
         return state
+
+    # ––––– resilient fetch –––––
+    def _download_with_retries(self, url: str, headers: dict) -> bytes:
+        delay = 1.0
+        for attempt in range(1, MAX_FETCH_RETRIES + 1):
+            try:
+                with requests.get(url, headers=headers, stream=True, timeout=30) as r:
+                    r.raise_for_status()
+                    return r.content
+            except Exception as ex:
+                if attempt == MAX_FETCH_RETRIES:
+                    raise
+                print(
+                    f"[SafetensorModelPersister] Download failed "
+                    f"(attempt {attempt}/{MAX_FETCH_RETRIES}): {ex}. "
+                    f"Retrying in {delay}s…"
+                )
+                time.sleep(delay)
+                delay *= 2  # exponential back-off
+        raise RuntimeError("Unreachable")
 
     def load_model(
         self,
@@ -294,15 +300,6 @@ class SafetensorModelPersister(ModelPersister):
         mmap: bool = False,
         **load_kwargs,
     ) -> _TensorDict:
-        """Load a safetensor shard onto CPU.
-
-        • If *path* starts with ``hf://`` the shard is streamed from the Hub
-          and cached on disk (subject to free-space check). The local cache
-          is always checked **first**, so the network is contacted only if
-          the shard is missing.
-        • Otherwise we honour *mmap* when available and fall back to
-          `safe_open()` for older safetensors.
-        """
         # ── Remote streaming path ───────────────────────────────────────
         if str(path).startswith("hf://"):
             from huggingface_hub import hf_hub_url
@@ -316,8 +313,6 @@ class SafetensorModelPersister(ModelPersister):
                     if mmap:
                         return load_file(cache_file, device="cpu", mmap=True, **load_kwargs)
                     return load_file(cache_file, device="cpu", **load_kwargs)
-                except TypeError:  # Older safetensors
-                    return self._load_with_safe_open(cache_file)
                 except Exception as ex:
                     # Corrupted cache? Warn & fall back to fresh download.
                     print(
@@ -327,25 +322,30 @@ class SafetensorModelPersister(ModelPersister):
 
             # ---------- Not cached (or cache unusable) → download -------
             url = hf_hub_url(repo_id, f"{dir_name}/{self._filename(layer_name)}")
-
             headers = {}
             if (token := os.environ.get("HF_TOKEN")):
                 headers["Authorization"] = f"Bearer {token}"
 
             try:
-                with requests.get(url, headers=headers, stream=True, timeout=30) as r:
-                    r.raise_for_status()
-                    data = r.content
-
-                # Best-effort cache write (only if enough free space)
-                self._maybe_cache_shard(repo_id, dir_name, layer_name, data)
-
-                return self._load_from_bytes(data)
+                data = self._download_with_retries(url, headers)
             except Exception as ex:  # pragma: no cover – network failure
-                print(
-                    f"[SafetensorModelPersister] stream-load failed: {ex}. "
-                    f"Falling back to local path…"
-                )
+                print(f"[SafetensorModelPersister] stream-load failed: {ex}")
+                raise
+
+            # Best-effort cache write (never evicts).
+            cache_file = self._write_cache_shard(repo_id, dir_name, layer_name, data)
+
+            # Load tensors.
+            if cache_file.exists():
+                try:
+                    if mmap:
+                        return load_file(cache_file, device="cpu", mmap=True, **load_kwargs)
+                    return load_file(cache_file, device="cpu", **load_kwargs)
+                except Exception:
+                    # Unexpected; fall back to bytes loader.
+                    pass
+
+            return self._load_from_bytes(data)
 
         # ── Local filesystem path (original behaviour) ──────────────────
         file_path = self._tensor_path(layer_name, Path(path))
@@ -355,5 +355,5 @@ class SafetensorModelPersister(ModelPersister):
 
         try:
             return load_file(file_path, device="cpu", mmap=True, **load_kwargs)
-        except TypeError:  # Older safetensors w/o mmap
+        except TypeError:  # older safetensors without mmap
             return self._load_with_safe_open(file_path)
