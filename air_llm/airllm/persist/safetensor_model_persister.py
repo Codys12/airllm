@@ -133,11 +133,15 @@ class SafetensorModelPersister(ModelPersister):
             url = hf_hub_url(
                 repo_id,
                 f"{dir_name}/{self._filename(layer_name)}",
-                token=os.environ.get("HF_TOKEN"),
             )
 
+            headers = {}
+            _tok = os.environ.get("HF_TOKEN")
+            if _tok:
+                headers["Authorization"] = f"Bearer {_tok}"
+
             try:
-                with requests.get(url, stream=True, timeout=30) as r:
+                with requests.get(url, headers=headers, stream=True, timeout=30) as r:
                     r.raise_for_status()
                     data = r.content
                 return self._load_from_bytes(data)
