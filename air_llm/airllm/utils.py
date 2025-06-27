@@ -156,14 +156,19 @@ def _stream_layer_from_hub(hf_path: str, layer_name: str) -> Dict[str, torch.Ten
     splitted_dir = stripped[split_at + 1:]           # keep leading folder
 
     filename = f"{layer_name.rstrip('.')}.safetensors"
-    url      = hf_hub_url(
+    url = hf_hub_url(
         repo_id,
         f"{splitted_dir}/{filename}",
-        token=os.environ.get("HF_TOKEN"),
     )
 
+    # ── auth header because `hf_hub_url` no longer accepts `token` ──
+    headers = {}
+    _tok = os.environ.get("HF_TOKEN")
+    if _tok:
+        headers["Authorization"] = f"Bearer {_tok}"
+
     # stream into memory
-    with requests.get(url, stream=True, timeout=30) as r:
+    with requests.get(url, headers=headers, stream=True, timeout=30) as r:
         r.raise_for_status()
         buffer = io.BytesIO(r.content)
 
