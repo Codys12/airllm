@@ -3,7 +3,7 @@ import json
 import os
 import ctypes
 import shutil
-import io
+import io, tempfile, os     # NEW
 import requests
 from tqdm import tqdm
 from pathlib import Path
@@ -172,13 +172,18 @@ def _stream_layer_from_hub(hf_path: str, layer_name: str) -> Dict[str, torch.Ten
         r.raise_for_status()
         buffer = io.BytesIO(r.content)
 
-    # `safe_open` ≥ 0.4 now expects a *filename* (str/PathLike).  
-    # Feeding raw bytes therefore raises:
-    #   TypeError: argument 'filename': 'bytes' object cannot be converted to 'PyString'
-    # Using `load_file` on the in-RAM buffer keeps the zero-disk workflow
-    # intact and works across all safetensors versions.
+    # `safe_open`/`load_file` ≥ 0.4 insist on a filesystem path.  
+    # We therefore spill the bytes into a *temporary* file, load, then delete.
     buffer.seek(0)
-    return load_file(buffer, device="cpu")
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        tmp.write(buffer.read())
+        tmp.flush()
+        tmp_name = tmp.name
+
+    try:
+        return load_file(tmp_name, device="cpu")
+    finally:
+        os.remove(tmp_name)
 
 
 # --------------------------------------------------------------------- #
