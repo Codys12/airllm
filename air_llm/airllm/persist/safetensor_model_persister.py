@@ -1,5 +1,4 @@
 import os
-import io
 import requests
 import shutil
 from pathlib import Path
@@ -23,17 +22,14 @@ class SafetensorModelPersister(ModelPersister):
     * Otherwise we fall back to `safe_open()` which never copies the bytes,
       so multiple processes still share the page‑cache.
 
-    New in June 2025
-    ----------------
-    • Recognises streaming URIs of the form
+    Streaming support (June 2025)
+    -----------------------------
+    Recognises URIs of the form
         ``hf://<repo_id>/splitted_model[.<compression>]``
-      and downloads individual shards straight from the Hugging Face Hub
-      into memory, bypassing disk entirely.
-
-    • **June 2025 patch** – If there is sufficient free disk space the
-      streamed shard is *also* stored in the local Hugging Face cache
-      (``$HF_HOME/huggingface/hub``).  This guarantees subsequent loads
-      hit the filesystem fast‑path without any network traffic.
+    and downloads individual shards straight from the Hugging Face Hub.
+    Once the payload is in RAM we try to *cache it on disk* inside the
+    standard Hugging Face cache dir so subsequent loads hit the filesystem
+    instead of the network—provided there is enough free space.
     """
 
     # ------------------------------------------------------------------ #
@@ -42,8 +38,8 @@ class SafetensorModelPersister(ModelPersister):
 
     @staticmethod
     def _filename(layer_name: str) -> str:
-        # remove a trailing dot to avoid “layer..safetensors”
-        return f"{layer_name.rstrip('.')}.safetensors"
+        """Normalise layer name → shard filename."""
+        return f"{layer_name.rstrip('.')}.safetensors"  # avoid double dots
 
     def _tensor_path(self, layer_name: str, base: Path) -> Path:
         return base / self._filename(layer_name)
@@ -57,65 +53,68 @@ class SafetensorModelPersister(ModelPersister):
 
     @staticmethod
     def _parse_hf_stream_path(hf_path: str) -> Tuple[str, str]:
-        """
-        Split ``hf://<repo_id>/<dir>`` into ``(<repo_id>, <dir>)``.
-        """
-        assert hf_path.startswith("hf://"), "not an hf-stream path"
+        """Split ``hf://<repo_id>/<dir>`` → ``(<repo_id>, <dir>)``."""
+        assert hf_path.startswith("hf://"), "not an hf‑stream path"
         stripped = hf_path[5:]
-        split_key = "/splitted_model"
-        split_at = stripped.index(split_key)  # raises if malformed
-        repo_id = stripped[:split_at]
-        dir_name = stripped[split_at + 1 :]  # keep folder name
+        key = "/splitted_model"
+        idx = stripped.index(key)  # raises if malformed
+        repo_id = stripped[:idx]
+        dir_name = stripped[idx + 1 :]  # keep folder name itself
         return repo_id, dir_name
 
-    @staticmethod
-    def _maybe_cache_shard(
-        repo_id: str, dir_name: str, file_name: str, data: bytes
-    ) -> None:
-        """
-        Attempt to write *data* to the Hugging Face cache directory.
-
-        The extra copy is skipped if there isn’t enough free space or
-        if any filesystem error occurs.  Failures are *silent* so that
-        model loading never breaks due to caching issues.
-        """
-        try:
-            cache_base = Path(HUGGINGFACE_HUB_CACHE)
-            # Bail if the cache root doesn’t exist (never initialised).
-            if not cache_base.exists():
-                return
-
-            free_space = shutil.disk_usage(cache_base).free
-            if free_space <= len(data) * 2:  # leave some breathing room
-                return
-
-            # `<repo_id>` may contain slashes — replace them for a flat path.
-            repo_path = repo_id.replace("/", "--")
-            cache_dir = cache_base / repo_path / dir_name
-            cache_dir.mkdir(parents=True, exist_ok=True)
-
-            shard_path = cache_dir / file_name
-            # Don’t overwrite an existing shard (might be newer).
-            if shard_path.exists():
-                return
-
-            with open(shard_path, "wb") as fp:
-                fp.write(data)
-        except Exception:
-            # Silently swallow all errors: caching is a best‑effort optimisation
-            pass
-
     def _load_from_bytes(self, data: bytes) -> Dict[str, "torch.Tensor"]:
-        """
-        Zero‑copy loader identical to `_load_with_safe_open` but operates on an
-        in‑memory buffer instead of a file.
-        """
+        """Zero‑copy tensor loader directly from a bytes object."""
         safe_open = import_module("safetensors.torch").safe_open
         tensors: Dict[str, "torch.Tensor"] = {}
         with safe_open(data, framework="pt", device="cpu") as f:
             for k in f.keys():
                 tensors[k] = f.get_tensor(k)
         return tensors
+
+    # ------------------------------------------------------------------ #
+    # caching helpers                                                    #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _enough_space(dir_path: Path, size_bytes: int, keep_free: int = 2_000_000_000) -> bool:
+        """True if writing *size_bytes* leaves ≥ *keep_free* bytes free."""
+        try:
+            usage = shutil.disk_usage(dir_path)
+        except FileNotFoundError:
+            # If the path doesn’t exist yet (e.g. first‑time), assume OK.
+            return True
+        return usage.free - size_bytes > keep_free
+
+    def _maybe_cache_shard(
+        self,
+        repo_id: str,
+        dir_name: str,
+        layer_name: str,
+        data: bytes,
+    ) -> None:
+        """Best‑effort write of the streamed shard to the HF cache."""
+        cache_root = Path(HUGGINGFACE_HUB_CACHE)
+        shard_path = cache_root / repo_id / dir_name / self._filename(layer_name)
+
+        # Already cached → done.
+        if shard_path.exists():
+            return
+
+        shard_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not self._enough_space(cache_root, len(data)):
+            # Insufficient space → skip quietly.
+            return
+
+        tmp = shard_path.with_suffix(shard_path.suffix + ".tmp")
+        try:
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, shard_path)
+        except Exception:
+            # Never fail model load because of caching.
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------ #
     # public API                                                         #
@@ -135,19 +134,17 @@ class SafetensorModelPersister(ModelPersister):
 
     def model_persist_exist(self, layer_name: str, saving_path: PathLike) -> bool:
         saving_path = Path(saving_path)
-        return self._tensor_path(layer_name, saving_path).exists() and self._done_path(
-            layer_name, saving_path
-        ).exists()
+        return (
+            self._tensor_path(layer_name, saving_path).exists()
+            and self._done_path(layer_name, saving_path).exists()
+        )
 
     # ------------------------------------------------------------------ #
     # loading                                                            #
     # ------------------------------------------------------------------ #
 
     def _load_with_safe_open(self, file_path: Path) -> Dict[str, "torch.Tensor"]:
-        """
-        Fallback loader that never copies data: tensors read directly from the
-        underlying mmap’d pages (works on *all* safetensors versions).
-        """
+        """Fallback loader that never copies data (mmap via safe_open)."""
         safe_open = import_module("safetensors.torch").safe_open
         state = {}
         with safe_open(file_path, framework="pt", device="cpu") as f:
@@ -163,14 +160,13 @@ class SafetensorModelPersister(ModelPersister):
         mmap: bool = False,
         **load_kwargs,
     ):
-        """
-        Load a safetensor shard onto CPU.
+        """Load a safetensor shard onto CPU.
 
-        • If *path* begins with ``hf://`` the shard is streamed directly from
-          the Hub into RAM ― never written to disk (unless caching succeeds).
+        • If *path* starts with ``hf://`` the shard is streamed from the Hub
+          and optionally cached on disk.
 
-        • Otherwise we honour *mmap* when possible and fall back to
-          *safe_open()* when the installed *safetensors* lacks that flag.
+        • Otherwise we honour *mmap* when available and fall back to
+          `safe_open()` for older safetensors.
         """
         # ── Remote streaming path ───────────────────────────────────────
         if str(path).startswith("hf://"):
@@ -180,21 +176,18 @@ class SafetensorModelPersister(ModelPersister):
             url = hf_hub_url(repo_id, f"{dir_name}/{self._filename(layer_name)}")
 
             headers = {}
-            _tok = os.environ.get("HF_TOKEN")
-            if _tok:
-                headers["Authorization"] = f"Bearer {_tok}"
+            if (token := os.environ.get("HF_TOKEN")):
+                headers["Authorization"] = f"Bearer {token}"
 
             try:
                 with requests.get(url, headers=headers, stream=True, timeout=30) as r:
                     r.raise_for_status()
                     data = r.content
-
-                # Best‑effort: stash a copy in the HF cache for future runs
-                self._maybe_cache_shard(repo_id, dir_name, self._filename(layer_name), data)
-
+                # Best‑effort cache
+                self._maybe_cache_shard(repo_id, dir_name, layer_name, data)
                 return self._load_from_bytes(data)
             except Exception as ex:
-                # Gracefully degrade to the disk‑cache loader
+                # Gracefully fall back to disk path
                 print(f"[SafetensorModelPersister] stream‑load failed: {ex}")
 
         # ── Local filesystem path (original behaviour) ──────────────────
@@ -203,9 +196,7 @@ class SafetensorModelPersister(ModelPersister):
         if not mmap:
             return load_file(file_path, device="cpu", **load_kwargs)
 
-        # Fast path: load_file(..., mmap=True)
         try:
             return load_file(file_path, device="cpu", mmap=True, **load_kwargs)
         except TypeError:
-            # Older safetensors: silently switch to safe_open()
             return self._load_with_safe_open(file_path)
