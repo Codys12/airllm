@@ -205,7 +205,10 @@ class SafetensorModelPersister(ModelPersister):
                 try:
                     os.replace(tmp_path, shard_path)
                 except OSError:
+                    print("OSERROR")
                     shutil.move(tmp_path, shard_path)
+            except Exception:
+                print("OTHER")
             finally:
                 if tmp_path.exists():
                     tmp_path.unlink(missing_ok=True)
