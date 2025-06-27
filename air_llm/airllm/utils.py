@@ -172,11 +172,13 @@ def _stream_layer_from_hub(hf_path: str, layer_name: str) -> Dict[str, torch.Ten
         r.raise_for_status()
         buffer = io.BytesIO(r.content)
 
-    state_dict: Dict[str, torch.Tensor] = {}
-    with safe_open(buffer.getvalue(), framework="pt", device="cpu") as f:
-        for k in f.keys():
-            state_dict[k] = f.get_tensor(k)
-    return state_dict
+    # `safe_open` ≥ 0.4 now expects a *filename* (str/PathLike).  
+    # Feeding raw bytes therefore raises:
+    #   TypeError: argument 'filename': 'bytes' object cannot be converted to 'PyString'
+    # Using `load_file` on the in-RAM buffer keeps the zero-disk workflow
+    # intact and works across all safetensors versions.
+    buffer.seek(0)
+    return load_file(buffer, device="cpu")
 
 
 # --------------------------------------------------------------------- #
